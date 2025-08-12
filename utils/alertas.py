@@ -683,3 +683,9 @@ def render_alertas_forecast(slpcode: int):
 
     with tabs[1]:
         vista_forecast_sin_ov()
+
+
+def _mes(d):
+    if pd.isnull(d):
+        return ""
+    return pd.to_datetime(d, format="%Y-%m-%d", errors="coerce").strftime("%Y-%m")
