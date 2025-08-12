@@ -1,0 +1,23 @@
+# Pilar 05 – Despliegue LAN (Quickpilot)
+**Fecha:** 2025-07-15  
+**Responsable:** Bastián Antiman
+
+## Estado alcanzado
+- Carpeta `quickpilot/` con:
+  - `start.bat` (Python 3.12, venv, puerto 8501)
+  - `main.py` acepta `?modulo=&vendedor=` via `st.query_params`
+  - BD `Plan_Final_Final_Final.db` en la misma carpeta
+- Streamlit escuchando en `0.0.0.0:8501`
+- Links compartidos (ej.):  
+  `http://192.168.6.45:8501/?modulo=ventas&vendedor=3`
+
+## Checklist operativo
+- [x] BD movida a carpeta local  
+- [x] `.env` con `DB_PATH=Plan_Final_Final_Final.db`  
+- [x] Firewall permite TCP 8501 dentro de sub-red  
+- [x] Test de escritura desde otro PC OK
+
+## Próximos hitos
+1. Convertir batch a servicio con NSSM  
+2. Dockerizar con mismo comando (`streamlit run main.py`)  
+3. Migrar a Supabase / Postgres

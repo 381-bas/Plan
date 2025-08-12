@@ -1,0 +1,14 @@
+﻿repos:
+  - repo: https://github.com/psf/black
+    rev: 24.4.2
+    hooks: [{ id: black }]
+  - repo: https://github.com/charliermarsh/ruff-pre-commit
+    rev: v0.5.0
+    hooks: [{ id: ruff }]
+  - repo: local
+    hooks:
+      - id: symbios-risklint
+        name: symbios-risklint
+        entry: python symbios_risklint.py
+        language: system
+        pass_filenames: false

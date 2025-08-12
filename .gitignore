@@ -1,0 +1,36 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Proyecto (no versionar)
+temp_ediciones/
+utils/logs/
+logs/
+Informacion/
+risklint_report.md
+
+# Datos y binarios
+*.pkl
+*.parquet
+*.csv
+*.xlsx
+*.sqlite
+*.db
+*.bak
+scans/
