@@ -1,0 +1,13 @@
+﻿fix = true
+show-fixes = true
+line-length = 120
+
+[lint]
+select = ["E","F"]
+ignore = ["E501"]
+
+[lint.per-file-ignores]
+"main.py" = ["F401"]
+"backup_diario.py" = ["F401"]
+"services/forecast_engine.py" = ["E402","F811"]
+"utils/repositorio_forecast/repositorio_forecast_editor.py" = ["E402"]

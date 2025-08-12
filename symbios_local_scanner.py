@@ -1,10 +1,10 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 SYMBIOS Local Scanner (auto-config)
 - Si se ejecuta SIN argumentos, usa rutas por defecto (CONFIG).
 - Si se ejecuta CON argumentos, respeta --root y --out.
-- Solo usa librerías estándar.
+- Solo usa librerÃ­as estÃ¡ndar.
 
 Salidas:
 - summary.txt, tree.txt, inventory.json, duplicates_report.md, imports.csv
@@ -17,9 +17,7 @@ import ast
 import csv
 import hashlib
 import json
-import os
 import re
-import sys
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
@@ -29,11 +27,14 @@ from typing import Dict, List, Optional, Tuple
 # CONFIG (ajusta si quieres)
 # =========================
 CONFIG = {
-    "DEFAULT_ROOT": str(Path(__file__).resolve().parent),                 # repo actual
-    "DEFAULT_OUT_BASE": str(Path(__file__).resolve().parent / "scans"),   # carpeta local del repo
+    "DEFAULT_ROOT": str(Path(__file__).resolve().parent),  # repo actual
+    "DEFAULT_OUT_BASE": str(
+        Path(__file__).resolve().parent / "scans"
+    ),  # carpeta local del repo
     "INCLUDE_TXT": True,
     "STAMP_SUBFOLDER": True,
 }
+
 
 # ==============
 # Data classes
@@ -68,9 +69,9 @@ class FileInfo:
     type: str  # "py" | "txt" | "other"
     line_count: Optional[int] = None
     functions: List[FunctionInfo] = None  # for .py
-    classes: List[ClassInfo] = None       # for .py
-    imports: List[str] = None             # for .py
-    txt_defs: List[str] = None            # for .txt
+    classes: List[ClassInfo] = None  # for .py
+    imports: List[str] = None  # for .py
+    txt_defs: List[str] = None  # for .txt
 
 
 # ==============
@@ -81,7 +82,7 @@ def sha256_bytes(b: bytes) -> str:
 
 
 def normalize_source(text: str) -> str:
-    # elimina espacios, tabs y líneas vacías para comparar fuentes similares
+    # elimina espacios, tabs y lÃ­neas vacÃ­as para comparar fuentes similares
     return re.sub(r"\s+", "", text or "")
 
 
@@ -95,15 +96,14 @@ def read_file_text(p: Path, max_bytes: int = 5_000_000) -> str:
         return data.decode("latin-1", errors="ignore")
 
 
-def extract_python_info(p: Path) -> Tuple[List[FunctionInfo], List[ClassInfo], List[str]]:
+def extract_python_info(
+    p: Path,
+) -> Tuple[List[FunctionInfo], List[ClassInfo], List[str]]:
     text = read_file_text(p)
     try:
         tree = ast.parse(text, filename=str(p))
     except Exception:
         return [], [], []
-    functions: List[FunctionInfo] = []
-    classes: List[ClassInfo] = []
-    imports: List[str] = []
     lines = text.splitlines()
 
     class FuncVisitor(ast.NodeVisitor):
@@ -135,7 +135,11 @@ def extract_python_info(p: Path) -> Tuple[List[FunctionInfo], List[ClassInfo], L
                     file=self.file_path,
                     is_method=False,
                     class_name=None,
-                    source_hash=sha256_bytes(normalize_source(src).encode("utf-8")) if src else None,
+                    source_hash=(
+                        sha256_bytes(normalize_source(src).encode("utf-8"))
+                        if src
+                        else None
+                    ),
                 )
             )
 
@@ -154,7 +158,11 @@ def extract_python_info(p: Path) -> Tuple[List[FunctionInfo], List[ClassInfo], L
                             file=self.file_path,
                             is_method=True,
                             class_name=node.name,
-                            source_hash=sha256_bytes(normalize_source(src).encode("utf-8")) if src else None,
+                            source_hash=(
+                                sha256_bytes(normalize_source(src).encode("utf-8"))
+                                if src
+                                else None
+                            ),
                         )
                     )
             self.classes.append(
@@ -171,7 +179,7 @@ def extract_python_info(p: Path) -> Tuple[List[FunctionInfo], List[ClassInfo], L
             if start is None:
                 return ""
             if end is None:
-                # intenta inferir hasta la próxima def/class o EOF
+                # intenta inferir hasta la prÃ³xima def/class o EOF
                 end_guess = start
                 for i in range(start, len(self.lines)):
                     line = self.lines[i - 1]
@@ -192,7 +200,9 @@ def extract_python_info(p: Path) -> Tuple[List[FunctionInfo], List[ClassInfo], L
 def extract_txt_defs(p: Path) -> List[str]:
     # busca firmas "def nombre(" en .txt (para Plan_unificado dumps)
     text = read_file_text(p)
-    defs = re.findall(r"^\s*def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", text, flags=re.MULTILINE)
+    defs = re.findall(
+        r"^\s*def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", text, flags=re.MULTILINE
+    )
     return sorted(set(defs))
 
 
@@ -210,7 +220,9 @@ def build_inventory(root: Path, include_txt: bool = True) -> Dict:
 
         size = path.stat().st_size
         mtime = path.stat().st_mtime
-        sha = sha256_bytes(path.read_bytes() if size <= 5_000_000 else b"")  # evita leer archivos enormes
+        sha = sha256_bytes(
+            path.read_bytes() if size <= 5_000_000 else b""
+        )  # evita leer archivos enormes
         info = FileInfo(
             path=str(path),
             size=size,
@@ -235,7 +247,7 @@ def build_inventory(root: Path, include_txt: bool = True) -> Dict:
             info.txt_defs = extract_txt_defs(path)
         all_files.append(info)
 
-    # Duplicados por hash de función
+    # Duplicados por hash de funciÃ³n
     dup_map: Dict[str, List[FunctionInfo]] = {}
     for fi in all_files:
         if fi.type != "py":
@@ -250,7 +262,9 @@ def build_inventory(root: Path, include_txt: bool = True) -> Dict:
                     continue
                 dup_map.setdefault(m.source_hash, []).append(m)
 
-    duplicates = {h: [asdict(f) for f in fns] for h, fns in dup_map.items() if len(fns) > 1}
+    duplicates = {
+        h: [asdict(f) for f in fns] for h, fns in dup_map.items() if len(fns) > 1
+    }
 
     # Grafo de imports
     import_edges = []
@@ -272,8 +286,12 @@ def build_inventory(root: Path, include_txt: bool = True) -> Dict:
             "py_files": sum(1 for f in all_files if f.type == "py"),
             "txt_files": sum(1 for f in all_files if f.type == "txt"),
             "other_files": sum(1 for f in all_files if f.type == "other"),
-            "functions_total": sum(len(f.functions or []) for f in all_files if f.type == "py"),
-            "classes_total": sum(len(f.classes or []) for f in all_files if f.type == "py"),
+            "functions_total": sum(
+                len(f.functions or []) for f in all_files if f.type == "py"
+            ),
+            "classes_total": sum(
+                len(f.classes or []) for f in all_files if f.type == "py"
+            ),
             "duplicates_groups": len(duplicates),
         },
     }
@@ -282,9 +300,11 @@ def build_inventory(root: Path, include_txt: bool = True) -> Dict:
 def write_reports(data: Dict, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     # JSON principal
-    (out_dir / "inventory.json").write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    (out_dir / "inventory.json").write_text(
+        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
-    # Árbol simple (texto)
+    # Ãrbol simple (texto)
     root = Path(data["root"])
     lines = []
     for f in data["files"]:
@@ -293,7 +313,7 @@ def write_reports(data: Dict, out_dir: Path) -> None:
             rel = str(Path(f["path"]).relative_to(root))
         except Exception:
             pass
-        lines.append(f'{rel}  [{f["type"]}]  {f.get("line_count","-")} líneas')
+        lines.append(f'{rel}  [{f["type"]}]  {f.get("line_count","-")} lÃ­neas')
     (out_dir / "tree.txt").write_text("\n".join(lines), encoding="utf-8")
 
     # Import edges CSV
@@ -318,7 +338,7 @@ def write_reports(data: Dict, out_dir: Path) -> None:
 
     # Resumen
     s = data["stats"]
-    summary = f"""SYMBIOS Local Scanner — Resumen
+    summary = f"""SYMBIOS Local Scanner â€” Resumen
 ==================================
 Root: {data["root"]}
 Generado: {data["generated_at"]}
@@ -330,19 +350,21 @@ Grupos de duplicados:   {s["duplicates_groups"]}
 
 Siguientes pasos sugeridos:
 - Revisar 'duplicates_report.md' (eliminar o unificar funciones repetidas).
-- Priorizar módulos con más funciones/líneas para pruebas.
+- Priorizar mÃ³dulos con mÃ¡s funciones/lÃ­neas para pruebas.
 - Usar 'imports.csv' para ver dependencias y hotspots.
 """
     (out_dir / "summary.txt").write_text(summary, encoding="utf-8")
 
 
 # =========================
-# API pública programática
+# API pÃºblica programÃ¡tica
 # =========================
-def run_scan(root_dir: str, out_base: str, include_txt: bool = True, stamp_subfolder: bool = True) -> Path:
+def run_scan(
+    root_dir: str, out_base: str, include_txt: bool = True, stamp_subfolder: bool = True
+) -> Path:
     root = Path(root_dir).expanduser()
     if not root.exists():
-        raise FileNotFoundError(f"No existe la carpeta raíz: {root}")
+        raise FileNotFoundError(f"No existe la carpeta raÃ­z: {root}")
     out_dir = Path(out_base).expanduser()
     if stamp_subfolder:
         out_dir = out_dir / f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -356,10 +378,16 @@ def run_scan(root_dir: str, out_base: str, include_txt: bool = True, stamp_subfo
 # ==========
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="SYMBIOS Local Scanner (auto-config)")
-    ap.add_argument("--root", help="Carpeta raíz a escanear (ej. C:\\...\\Plan_Forecast)")
+    ap.add_argument(
+        "--root", help="Carpeta raÃ­z a escanear (ej. C:\\...\\Plan_Forecast)"
+    )
     ap.add_argument("--out", help="Carpeta base donde guardar reportes")
-    ap.add_argument("--no-txt", action="store_true", help="No escanear .txt en busca de 'def ...'")
-    ap.add_argument("--no-stamp", action="store_true", help="No crear subcarpeta con timestamp")
+    ap.add_argument(
+        "--no-txt", action="store_true", help="No escanear .txt en busca de 'def ...'"
+    )
+    ap.add_argument(
+        "--no-stamp", action="store_true", help="No crear subcarpeta con timestamp"
+    )
     args = ap.parse_args(argv)
 
     # Si faltan args, usar CONFIG por defecto
@@ -373,13 +401,21 @@ def main(argv=None) -> int:
     print(f"[SYMBIOS] INCLUDE_TXT = {include_txt}")
 
     try:
-        out_dir = run_scan(root, out_base, include_txt=include_txt, stamp_subfolder=stamp)
+        out_dir = run_scan(
+            root, out_base, include_txt=include_txt, stamp_subfolder=stamp
+        )
     except FileNotFoundError as e:
         print(f"[ERROR] {e}")
         return 2
 
     print(f"[SYMBIOS] Listo. Reportes en: {out_dir}")
-    for n in ["summary.txt", "tree.txt", "inventory.json", "duplicates_report.md", "imports.csv"]:
+    for n in [
+        "summary.txt",
+        "tree.txt",
+        "inventory.json",
+        "duplicates_report.md",
+        "imports.csv",
+    ]:
         print(f" - {out_dir / n}")
     return 0
 

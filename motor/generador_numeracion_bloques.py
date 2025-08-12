@@ -4,6 +4,7 @@
 import os
 import re
 
+
 def renumerar_bloques_en_archivo(ruta_archivo):
     nueva_ruta = ruta_archivo + ".renum"
     with open(ruta_archivo, "r", encoding="utf-8") as f:
@@ -22,6 +23,7 @@ def renumerar_bloques_en_archivo(ruta_archivo):
 
     return nueva_ruta
 
+
 def procesar_directorio(directorio_base):
     archivos = []
     for root, _, files in os.walk(directorio_base):
@@ -32,7 +34,10 @@ def procesar_directorio(directorio_base):
                 archivos.append((ruta, nueva))
     return archivos
 
+
 if __name__ == "__main__":
     BASE = r"C:/Users/qmkbantiman/OneDrive - QMK SPA/GG/Python/Plan_Forecast"
     resultados = procesar_directorio(BASE)
-    print(f"✅ Renumeración aplicada a {len(resultados)} archivos. Archivos .renum generados.")
+    print(
+        f"✅ Renumeración aplicada a {len(resultados)} archivos. Archivos .renum generados."
+    )

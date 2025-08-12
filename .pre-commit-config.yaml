@@ -12,3 +12,4 @@
         entry: python symbios_risklint.py
         language: system
         pass_filenames: false
+

@@ -1,6 +1,6 @@
-# B_TMP001: Importaciones y configuración de base temporal para backups de edición
-# # ∂B_TMP001/∂B0
-import os, pickle
+﻿# B_TMP001: Importaciones y configuraciÃ³n de base temporal para backups de ediciÃ³n
+# # âˆ‚B_TMP001/âˆ‚B0
+import os
 import pandas as pd
 import hashlib
 from pathlib import Path
@@ -10,18 +10,23 @@ from session_utils import normalize_df_for_hash, safe_pickle_load, atomic_pickle
 BASE_TEMP = os.path.join(os.path.dirname(__file__), "..", "temp_ediciones")
 os.makedirs(BASE_TEMP, exist_ok=True)
 
-# B_TMP002: Construcción de ruta de backup temporal para cliente
-# # ∂B_TMP002/∂B0
+
+# B_TMP002: ConstrucciÃ³n de ruta de backup temporal para cliente
+# # âˆ‚B_TMP002/âˆ‚B0
 def _ruta_temp(cliente: str) -> str:
     return os.path.join(BASE_TEMP, f"{cliente}_forecast.pkl")
 
-# B_HDF001: Hash robusto de DataFrame usando SHA-256 (control de integridad)
-# # ∂B_HDF001/∂B0
-def hash_df(df):
-    return hashlib.sha256(pd.util.hash_pandas_object(df.sort_index(axis=1), index=True).values).hexdigest()
 
-# B_NRM001: Normalización selectiva de columnas numéricas para hashing
-# # ∂B_NRM001/∂B0
+# B_HDF001: Hash robusto de DataFrame usando SHA-256 (control de integridad)
+# # âˆ‚B_HDF001/âˆ‚B0
+def hash_df(df):
+    return hashlib.sha256(
+        pd.util.hash_pandas_object(df.sort_index(axis=1), index=True).values
+    ).hexdigest()
+
+
+# B_NRM001: NormalizaciÃ³n selectiva de columnas numÃ©ricas para hashing
+# # âˆ‚B_NRM001/âˆ‚B0
 def _normalizar_hash(df_: pd.DataFrame) -> pd.DataFrame:
     df_copia = df_.copy()
     df_copia.columns = df_copia.columns.astype(str)
@@ -36,14 +41,15 @@ def _normalizar_hash(df_: pd.DataFrame) -> pd.DataFrame:
 
     return df_copia.sort_index(axis=0).sort_index(axis=1)
 
+
 # B_TMP003: Guardado seguro de backup temporal (.pkl) del DataFrame de cliente
-# # ∂B_TMP003/∂B0
+# # âˆ‚B_TMP003/âˆ‚B0
 def guardar_temp_local(cliente: str, df: pd.DataFrame):
     """
     Backup temporal (pickle) por cliente:
     - Hash estructural estable para evitar escrituras redundantes.
     - Lectura segura (lista blanca) confinada al directorio destino.
-    - Escritura atómica (tmp + replace).
+    - Escritura atÃ³mica (tmp + replace).
     """
     ruta_str = _ruta_temp(cliente)  # p.ej. ".../tmp/<cliente>.pkl"
     ruta = Path(ruta_str).resolve()
@@ -60,14 +66,14 @@ def guardar_temp_local(cliente: str, df: pd.DataFrame):
                 df_prev_norm = normalize_df_for_hash(df_prev)
                 hash_prev = int(hash_pandas_object(df_prev_norm, index=True).sum())
             except Exception as _e:
-                print(f"⚠️  Backup previo ilegible, se reescribirá: {ruta} ({_e})")
+                print(f"âš ï¸  Backup previo ilegible, se reescribirÃ¡: {ruta} ({_e})")
 
         if hash_prev is not None and nuevo_hash == hash_prev:
-            print(f"🟡 Sin cambios para {cliente}, se evita escritura redundante.")
+            print(f"ðŸŸ¡ Sin cambios para {cliente}, se evita escritura redundante.")
             return
 
         atomic_pickle_dump(df, ruta)
-        print(f"✅ Backup temporal guardado para {cliente} -> {ruta}")
+        print(f"âœ… Backup temporal guardado para {cliente} -> {ruta}")
 
     except Exception as e:
-        print(f"❌ Error al guardar backup temporal para {cliente}: {e}")
+        print(f"âŒ Error al guardar backup temporal para {cliente}: {e}")

@@ -2,13 +2,7 @@
 # # ∂B_TAB001/∂B0
 import streamlit as st
 import pandas as pd
-from utils.db import (
-    run_query,
-    _run_tab_select,
-    DB_PATH
-)
-
-
+from utils.db import run_query, _run_tab_select, DB_PATH
 
 
 # B_TAB002: Obtención del set de ítems existentes desde OITM
@@ -17,6 +11,7 @@ def obtener_items_existentes(db_path=DB_PATH):
     query = "SELECT DISTINCT ItemCode FROM OITM"
     df = run_query(query, db_path)
     return set(df["ItemCode"].astype(str).tolist())
+
 
 # B_TAB003: Consulta y pivoteo de forecast detalle anual para vendedores seleccionados
 # # ∂B_TAB003/∂B0
@@ -35,7 +30,7 @@ def obtener_forecast_detalle(anio, slpcodes=None):
     params = [str(anio)]
 
     if slpcodes:
-        placeholders = ','.join(['?'] * len(slpcodes))
+        placeholders = ",".join(["?"] * len(slpcodes))
         query_base += f" AND SlpCode IN ({placeholders})"
         params.extend(slpcodes)
 
@@ -48,7 +43,7 @@ def obtener_forecast_detalle(anio, slpcodes=None):
         index=["SlpCode", "ItemCode", "TipoForecast", "OcrCode3"],
         columns="Mes",
         values="Total",
-        fill_value=0
+        fill_value=0,
     ).reset_index()
 
     # Asegurar columnas de 1 a 12 como texto
@@ -59,10 +54,13 @@ def obtener_forecast_detalle(anio, slpcodes=None):
             df_pivot[str(i)] = 0
 
     # Ordenar columnas por mes
-    columnas_ordenadas = ["SlpCode", "ItemCode", "TipoForecast", "OcrCode3"] + [str(i) for i in range(1, 13)]
+    columnas_ordenadas = ["SlpCode", "ItemCode", "TipoForecast", "OcrCode3"] + [
+        str(i) for i in range(1, 13)
+    ]
     df_pivot = df_pivot[columnas_ordenadas]
 
     return df_pivot
+
 
 # B_TAB004: Visualización agregada y clasificación de forecast por línea y existencia
 # # ∂B_TAB004/∂B0
@@ -75,7 +73,9 @@ def mostrar_forecast_agregado():
     )
     lista_vendedores = vendedores_df["SlpCode"].tolist()
 
-    seleccion_vendedores = st.multiselect("SlpCode (vendedor):", options=lista_vendedores, default=lista_vendedores)
+    seleccion_vendedores = st.multiselect(
+        "SlpCode (vendedor):", options=lista_vendedores, default=lista_vendedores
+    )
 
     slpcodes = seleccion_vendedores if seleccion_vendedores else None
     df = obtener_forecast_detalle(anio, slpcodes)
@@ -86,7 +86,9 @@ def mostrar_forecast_agregado():
 
     # Clasificar productos
     items_existentes = obtener_items_existentes()
-    df["Item"] = df["ItemCode"].apply(lambda x: "Existente" if x in items_existentes else "Desarrollo")
+    df["Item"] = df["ItemCode"].apply(
+        lambda x: "Existente" if x in items_existentes else "Desarrollo"
+    )
 
     # Renombrar campo OcrCode3 → Línea
     df = df.rename(columns={"OcrCode3": "Línea"})
@@ -110,6 +112,7 @@ def mostrar_forecast_agregado():
 
     st.dataframe(df_vista, use_container_width=True, height=altura)
 
+
 # B_TAB005: Ejecutor principal de visualización de forecast por línea y existencia
 # # ∂B_TAB005/∂B0
 def run():
@@ -117,4 +120,3 @@ def run():
 
     with tabs[0]:
         mostrar_forecast_agregado()
-
