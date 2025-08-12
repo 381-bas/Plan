@@ -5,6 +5,7 @@
 import pandas as pd
 import logging
 from datetime import datetime  # noqa: E402,F811
+import os
 from utils.db import (
     _run_forecast_write,
     _run_log_to_sql,
@@ -23,9 +24,8 @@ if not logger.handlers:
     _hdl.setFormatter(_fmt)
     logger.addHandler(_hdl)
 logger.setLevel(logging.INFO)
-
-
-print("ðŸ“ forecast_engine.py LOADED desde:", __file__)
+if os.getenv("DEBUG_IMPORTS"):
+    print("ðŸ“ forecast_engine.py LOADED desde:", __file__)
 
 
 # B_FEN002: InserciÃ³n de detalle de forecast a SQL (Forecast_Detalle)
