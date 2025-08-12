@@ -14,11 +14,31 @@ Genera: risklint_report.md
 """
 
 from __future__ import annotations
-import re, sys
+import re, os
 from pathlib import Path
 from typing import List, Tuple, Dict
 
-ROOT = Path(r"C:\Users\qmkbantiman\Documents\Plan_qmk")
+# --- SYMBIOS: raíz del repo y filtros de escaneo (sin rutas absolutas) ---
+REPO_ROOT = Path(__file__).resolve().parent
+ROOT = Path(os.getenv("SYMBIOS_ROOT", REPO_ROOT))
+
+ALLOW_DIRS = {"components","config","core","modulos","motor","services","utils"}
+EXCLUDE_DIRS = {"temp_ediciones","__pycache__","logs","utils\\logs","Informacion",".github",".venv","backups","gpt_engine"}
+
+def should_skip(p: Path) -> bool:
+    parts_lower = [s.lower() for s in p.parts]
+    if any(ex.lower() in parts_lower for ex in EXCLUDE_DIRS):
+        return True
+    if p.suffix != ".py":
+        return True
+    # si está en subcarpeta, exigir que sea una de las permitidas
+    if len(p.parts) > 1 and p.parts[1].lower() not in {d.lower() for d in ALLOW_DIRS}:
+        return True
+    # no lint a los propios utilitarios symbios_* (opcional)
+    if p.name.startswith("symbios_"):
+        return True
+    return False
+
 
 # ---------- Define reglas ----------
 Rule = Tuple[str, str, str]  # (id, severidad, regex)
@@ -93,7 +113,7 @@ def scan_file(path: Path) -> List[Dict]:
 
 def main() -> int:
     # Excluir utilitarios propios para no contaminar el conteo
-    py_files = [p for p in ROOT.rglob("*.py") if p.is_file() and not p.name.startswith("symbios_")]
+    py_files = [p for p in ROOT.rglob("*.py") if p.is_file() and not should_skip(p)]
     all_findings: List[Dict] = []
     for f in py_files:
         all_findings.extend(scan_file(f))

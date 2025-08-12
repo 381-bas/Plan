@@ -29,10 +29,10 @@ from typing import Dict, List, Optional, Tuple
 # CONFIG (ajusta si quieres)
 # =========================
 CONFIG = {
-    "DEFAULT_ROOT": r"C:\Users\qmkbantiman\OneDrive - QMK SPA\GG\Python\Plan_Forecast",
-    "DEFAULT_OUT_BASE": r"C:\Users\qmkbantiman\OneDrive - QMK SPA\GG\Python\DocS",
-    "INCLUDE_TXT": True,  # escanear "8. Plan_unificado_p*" y otros .txt en busca de defs
-    "STAMP_SUBFOLDER": True,  # crea subcarpeta "scan_YYYYmmdd_HHMMSS" dentro de OUT_BASE
+    "DEFAULT_ROOT": str(Path(__file__).resolve().parent),                 # repo actual
+    "DEFAULT_OUT_BASE": str(Path(__file__).resolve().parent / "scans"),   # carpeta local del repo
+    "INCLUDE_TXT": True,
+    "STAMP_SUBFOLDER": True,
 }
 
 # ==============
