@@ -1,4 +1,4 @@
-# B91: Importaciones para escaneo de dependencias estructurales
+﻿# B91: Importaciones para escaneo de dependencias estructurales
 # ∂Bᵢ/∂Bⱼ
 import re
 from typing import Dict, List

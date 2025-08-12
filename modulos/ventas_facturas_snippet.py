@@ -1,4 +1,4 @@
-# modulos/ventas_facturas_snippet.py
+﻿# modulos/ventas_facturas_snippet.py
 
 from __future__ import annotations
 from typing import Any, List, Tuple

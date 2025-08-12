@@ -1,4 +1,4 @@
-# B_BUF001: Importaciones principales y dependencias del buffer de edición
+﻿# B_BUF001: Importaciones principales y dependencias del buffer de edición
 # # ∂B_BUF001/∂B0
 import pandas as pd
 import streamlit as st

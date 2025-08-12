@@ -1,4 +1,4 @@
-# B_TRAZ001: Visualización de trazabilidad forecast por cliente y SKU
+﻿# B_TRAZ001: Visualización de trazabilidad forecast por cliente y SKU
 # # ∂B_TRAZ001/∂B0
 import streamlit as st
 import pandas as pd

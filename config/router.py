@@ -1,4 +1,4 @@
-# B_ROUT001: Importaciones base e infraestructura para router dinámico de módulos
+﻿# B_ROUT001: Importaciones base e infraestructura para router dinámico de módulos
 # # ∂B_ROUT001/∂B0
 import importlib
 import streamlit as st

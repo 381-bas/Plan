@@ -1,4 +1,4 @@
-# B_TAB001: Importaciones principales y configuración de DB para forecast_tablas
+﻿# B_TAB001: Importaciones principales y configuración de DB para forecast_tablas
 # # ∂B_TAB001/∂B0
 import streamlit as st
 import pandas as pd

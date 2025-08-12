@@ -1,4 +1,4 @@
-# generador_numeracion_bloques.py · MODO REFACTOR ♻️
+﻿# generador_numeracion_bloques.py · MODO REFACTOR ♻️
 # Fecha: 2025-06-23 · Firma: PRONT
 
 import os

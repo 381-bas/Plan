@@ -1,4 +1,4 @@
-# B_EXP001: Importaciones y configuración global de exportación SCANNER
+﻿# B_EXP001: Importaciones y configuración global de exportación SCANNER
 # # ∂B_EXP001/∂B0
 import os
 import re

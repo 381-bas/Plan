@@ -4,7 +4,7 @@
 SYMBIOS Local Scanner (auto-config)
 - Si se ejecuta SIN argumentos, usa rutas por defecto (CONFIG).
 - Si se ejecuta CON argumentos, respeta --root y --out.
-- Solo usa librerÃ­as estÃ¡ndar.
+- Solo usa librerías estándar.
 
 Salidas:
 - summary.txt, tree.txt, inventory.json, duplicates_report.md, imports.csv
@@ -82,7 +82,7 @@ def sha256_bytes(b: bytes) -> str:
 
 
 def normalize_source(text: str) -> str:
-    # elimina espacios, tabs y lÃ­neas vacÃ­as para comparar fuentes similares
+    # elimina espacios, tabs y líneas vacías para comparar fuentes similares
     return re.sub(r"\s+", "", text or "")
 
 
@@ -179,7 +179,7 @@ def extract_python_info(
             if start is None:
                 return ""
             if end is None:
-                # intenta inferir hasta la prÃ³xima def/class o EOF
+                # intenta inferir hasta la próxima def/class o EOF
                 end_guess = start
                 for i in range(start, len(self.lines)):
                     line = self.lines[i - 1]
@@ -247,7 +247,7 @@ def build_inventory(root: Path, include_txt: bool = True) -> Dict:
             info.txt_defs = extract_txt_defs(path)
         all_files.append(info)
 
-    # Duplicados por hash de funciÃ³n
+    # Duplicados por hash de función
     dup_map: Dict[str, List[FunctionInfo]] = {}
     for fi in all_files:
         if fi.type != "py":
@@ -304,7 +304,7 @@ def write_reports(data: Dict, out_dir: Path) -> None:
         json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
-    # Ãrbol simple (texto)
+    # Árbol simple (texto)
     root = Path(data["root"])
     lines = []
     for f in data["files"]:
@@ -313,7 +313,7 @@ def write_reports(data: Dict, out_dir: Path) -> None:
             rel = str(Path(f["path"]).relative_to(root))
         except Exception:
             pass
-        lines.append(f'{rel}  [{f["type"]}]  {f.get("line_count","-")} lÃ­neas')
+        lines.append(f'{rel}  [{f["type"]}]  {f.get("line_count","-")} líneas')
     (out_dir / "tree.txt").write_text("\n".join(lines), encoding="utf-8")
 
     # Import edges CSV
@@ -338,7 +338,7 @@ def write_reports(data: Dict, out_dir: Path) -> None:
 
     # Resumen
     s = data["stats"]
-    summary = f"""SYMBIOS Local Scanner â€” Resumen
+    summary = f"""SYMBIOS Local Scanner — Resumen
 ==================================
 Root: {data["root"]}
 Generado: {data["generated_at"]}
@@ -350,21 +350,21 @@ Grupos de duplicados:   {s["duplicates_groups"]}
 
 Siguientes pasos sugeridos:
 - Revisar 'duplicates_report.md' (eliminar o unificar funciones repetidas).
-- Priorizar mÃ³dulos con mÃ¡s funciones/lÃ­neas para pruebas.
+- Priorizar módulos con más funciones/líneas para pruebas.
 - Usar 'imports.csv' para ver dependencias y hotspots.
 """
     (out_dir / "summary.txt").write_text(summary, encoding="utf-8")
 
 
 # =========================
-# API pÃºblica programÃ¡tica
+# API pública programática
 # =========================
 def run_scan(
     root_dir: str, out_base: str, include_txt: bool = True, stamp_subfolder: bool = True
 ) -> Path:
     root = Path(root_dir).expanduser()
     if not root.exists():
-        raise FileNotFoundError(f"No existe la carpeta raÃ­z: {root}")
+        raise FileNotFoundError(f"No existe la carpeta raíz: {root}")
     out_dir = Path(out_base).expanduser()
     if stamp_subfolder:
         out_dir = out_dir / f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -379,7 +379,7 @@ def run_scan(
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="SYMBIOS Local Scanner (auto-config)")
     ap.add_argument(
-        "--root", help="Carpeta raÃ­z a escanear (ej. C:\\...\\Plan_Forecast)"
+        "--root", help="Carpeta raíz a escanear (ej. C:\\...\\Plan_Forecast)"
     )
     ap.add_argument("--out", help="Carpeta base donde guardar reportes")
     ap.add_argument(

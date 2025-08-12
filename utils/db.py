@@ -1,6 +1,6 @@
-﻿"""utils/db.py â€“ nÃºcleo flexibleÂ E1+legacy
+﻿"""utils/db.py – núcleo flexible E1+legacy
 ================================================
-Este mÃ³dulo centraliza el acceso a SQLite siguiendo RATUCâ€‘F.
+Este módulo centraliza el acceso a SQLite siguiendo RATUC‑F.
 Provide flexible helper functions that support both legacy and new call signatures so that no downstream code breaks while we migrate.
 """
 
@@ -13,29 +13,29 @@ from functools import wraps
 from typing import Any, Callable, List, Tuple
 
 # ---------------------------------------------------------------------------
-# ðŸ“Œ ConfiguraciÃ³n global
+# 📌 Configuración global
 # ---------------------------------------------------------------------------
 DB_PATH: str = (
     "C:/Users/qmkbantiman/OneDrive - QMK SPA/Informacion/quickpilot/Plan_Final_Final_Final.db"
 )
 
 # ---------------------------------------------------------------------------
-# ðŸ”‘ NÃºcleo limpio (lectura / escritura)
+# 🔑 Núcleo limpio (lectura / escritura)
 # ---------------------------------------------------------------------------
 
 
 def run_query(sql: str, *args: Any, **kwargs: Any) -> pd.DataFrame:  # noqa: C901
     """Ejecuta un SELECT y devuelve un **pandas.DataFrame**.
 
-    Acepta **dos** patrones de llamada para compatibilidad retroâ€‘activa:
+    Acepta **dos** patrones de llamada para compatibilidad retro‑activa:
 
     1. **Legado**  (3 posicionales)
        >>> run_query(sql, DB_PATH, params)
 
-    2. **Nuevo**   (params como *kwâ€‘only*)
+    2. **Nuevo**   (params como *kw‑only*)
        >>> run_query(sql, params=params, db_path=DB_PATH)
 
-    El parÃ¡metro *db_path* es opcional y por defecto usa :data:`DB_PATH`.
+    El parámetro *db_path* es opcional y por defecto usa :data:`DB_PATH`.
     """
     # ------------------ Parseo flexible de argumentos ------------------
     db_path: str = kwargs.pop("db_path", DB_PATH)
@@ -53,7 +53,7 @@ def run_query(sql: str, *args: Any, **kwargs: Any) -> pd.DataFrame:  # noqa: C90
             db_path, params = args  # type: ignore[assignment]
         else:
             raise TypeError(
-                f"run_query() esperaba â‰¤3 posicionales, recibiÃ³ {len(args) + 1}."
+                f"run_query() esperaba ≤3 posicionales, recibió {len(args) + 1}."
             )
     else:
         params = kwargs.pop("params", ())
@@ -63,7 +63,7 @@ def run_query(sql: str, *args: Any, **kwargs: Any) -> pd.DataFrame:  # noqa: C90
 
     params = params or ()
 
-    # ------------------ EjecuciÃ³n ------------------
+    # ------------------ Ejecución ------------------
     with sqlite3.connect(db_path) as conn:
         return pd.read_sql_query(sql, conn, params=params)
 
@@ -78,8 +78,8 @@ def _execute_write(
 ) -> None:
     """INSERT/UPDATE/DELETE con *commit*.
 
-    *   **many=True** â†’ usa *executemany*.
-    *   Param *params* opcional se normaliza a tupla vacÃ­a.
+    *   **many=True** → usa *executemany*.
+    *   Param *params* opcional se normaliza a tupla vacía.
     """
     params = params or ()
     with sqlite3.connect(db_path, timeout=timeout) as conn:
@@ -88,14 +88,14 @@ def _execute_write(
 
 
 # ---------------------------------------------------------------------------
-# ðŸ”„ Decorador de reintento (bloqueo)
+# 🔄 Decorador de reintento (bloqueo)
 # ---------------------------------------------------------------------------
 
 
 def retry_sql_locked(
     max_attempts: int = 5, delay: float = 0.4
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Reintenta cuando la base estÃ¡ bloqueada (*database is locked*)."""
+    """Reintenta cuando la base está bloqueada (*database is locked*)."""
 
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
         @wraps(fn)
@@ -117,21 +117,21 @@ def retry_sql_locked(
     return decorator
 
 
-# utils/db.py  (o el mÃ³dulo donde se declaren los wrappers)
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# utils/db.py  (o el módulo donde se declaren los wrappers)
+# ──────────────────────────────────────────────────────────
 def _run_forecast_select(
     sql: str, params: tuple | None = None, db_path: str = DB_PATH
 ) -> pd.DataFrame:
-    """Select genÃ©rico (mantiene API antigua, aÃ±ade db_path opcional)."""
+    """Select genérico (mantiene API antigua, añade db_path opcional)."""
     return run_query(sql, db_path, params=params or ())
 
 
-# IdÃ©ntico patrÃ³n para _run_admin_select, _run_product_select, etc.
+# Idéntico patrón para _run_admin_select, _run_product_select, etc.
 
 
 # ---------------------------------------------------------------------------
-# ðŸ§© Wrappers por flujo (alias â†’ nÃºcleo)
-#   Conservan nombres histÃ³ricos para cero breakingâ€‘changes
+# 🧩 Wrappers por flujo (alias → núcleo)
+#   Conservan nombres históricos para cero breaking‑changes
 # ---------------------------------------------------------------------------
 def _run_admin_select(sql, params=None):
     return run_query(sql, params=params or ())
@@ -177,12 +177,12 @@ _run_client_insert = _execute_write
 _run_vendor_insert = _execute_write
 
 # ---------------------------------------------------------------------------
-# ðŸ·ï¸  Wrappers con lÃ³gica dedicada
+# 🏷️  Wrappers con lógica dedicada
 # ---------------------------------------------------------------------------
 
 
 def _run_log_to_sql(df: pd.DataFrame, table: str, *, db_path: str = DB_PATH) -> None:
-    """Carga un DataFrame en *table* (append) si no estÃ¡ vacÃ­o."""
+    """Carga un DataFrame en *table* (append) si no está vacío."""
     if df.empty:
         return
     with sqlite3.connect(db_path, timeout=15) as conn:
@@ -203,7 +203,7 @@ def _run_forecast_insert_get_id(
 def _run_log_write(
     sql: str, params: Tuple[Any, ...], *, db_path: str = DB_PATH
 ) -> None:  # noqa: D401
-    """INSERT/UPDATE con reintento cuando la base estÃ© bloqueada."""
+    """INSERT/UPDATE con reintento cuando la base esté bloqueada."""
     with sqlite3.connect(db_path, timeout=15) as conn:
         conn.execute(sql, params)
         conn.commit()
@@ -214,7 +214,7 @@ def _duplicar_forecast_reasignacion(
     slp_destino: int,
     cardcodes: List[str],
 ) -> None:
-    """TransacciÃ³n compleja: duplica registros Forecast conservando histÃ³rico."""
+    """Transacción compleja: duplica registros Forecast conservando histórico."""
     with sqlite3.connect(DB_PATH, timeout=30) as conn:
         try:
             conn.execute("BEGIN")
@@ -259,10 +259,10 @@ def _duplicar_forecast_reasignacion(
 
 
 # ---------------------------------------------------------------------------
-# âœ¨ API pÃºblica
+# ✨ API pública
 # ---------------------------------------------------------------------------
 __all__ = [
-    # nÃºcleo
+    # núcleo
     "run_query",
     "_execute_write",
     # selects

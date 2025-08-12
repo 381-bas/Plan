@@ -1,4 +1,4 @@
-# B_CTX001: Importaciones principales y configuración de entorno para el panel administrativo SYMBIOS
+﻿# B_CTX001: Importaciones principales y configuración de entorno para el panel administrativo SYMBIOS
 # # ∂B_CTX001/∂B0
 import streamlit as st
 import pandas as pd

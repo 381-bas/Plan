@@ -1,4 +1,4 @@
-# B_CTX001: Importaciones y variables de contexto predeterminadas
+﻿# B_CTX001: Importaciones y variables de contexto predeterminadas
 # # ∂B_CTX001/∂B0
 import streamlit as st
 from datetime import datetime

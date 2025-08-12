@@ -1,4 +1,4 @@
-# B_CTX001: Importaciones principales del módulo de Gestión Comercial y dependencias core
+﻿# B_CTX001: Importaciones principales del módulo de Gestión Comercial y dependencias core
 # # ∂B_CTX001/∂B0
 import streamlit as st
 import pandas as pd

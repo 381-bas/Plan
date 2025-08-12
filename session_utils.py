@@ -7,8 +7,8 @@ import pickle
 import pandas as pd
 import numpy as np
 
-# B_TMP001: Importaciones y configuraciÃ³n de base temporal para backups de ediciÃ³n
-# # âˆ‚B_TMP001/âˆ‚B0
+# B_TMP001: Importaciones y configuración de base temporal para backups de edición
+# # ∂B_TMP001/∂B0
 
 
 try:
@@ -22,7 +22,7 @@ except Exception:  # permite importar sin Streamlit en tests
 
 
 def set_slpcode(value: int) -> None:
-    """Set SlpCode de forma canÃ³nica y mantiene back-compat 'slpcode'."""
+    """Set SlpCode de forma canónica y mantiene back-compat 'slpcode'."""
     v = int(value)
     st.session_state["SlpCode"] = v
     st.session_state["slpcode"] = v  # compat temporal
@@ -38,7 +38,7 @@ def get_slpcode(default: int = 999) -> int:
 class _RestrictedUnpickler(pickle.Unpickler):
     """
     Unpickler con lista blanca para deserializar objetos seguros (DF/Series/ndarray y builtins).
-    Evita code execution vÃ­a pickle.
+    Evita code execution vía pickle.
     """
 
     _ALLOWED = {
@@ -63,13 +63,13 @@ class _RestrictedUnpickler(pickle.Unpickler):
 
 
 def restricted_unpickle(fp: io.BufferedReader) -> Any:
-    """Carga â€˜pickleâ€™ con lista blanca de tipos permitidos."""
+    """Carga ‘pickle’ con lista blanca de tipos permitidos."""
     return _RestrictedUnpickler(fp).load()
 
 
 def safe_pickle_load(path: str | Path, allowed_dir: str | Path) -> Any:
     """
-    Carga un pickle sÃ³lo si â€˜pathâ€™ cae dentro de â€˜allowed_dirâ€™ y usando RestrictedUnpickler.
+    Carga un pickle sólo si ‘path’ cae dentro de ‘allowed_dir’ y usando RestrictedUnpickler.
     """
     p = Path(path).resolve()
     base = Path(allowed_dir).resolve()
@@ -81,7 +81,7 @@ def safe_pickle_load(path: str | Path, allowed_dir: str | Path) -> Any:
 
 def atomic_pickle_dump(obj: Any, path: str | Path) -> None:
     """
-    Escritura atÃ³mica: dump a .tmp y luego replace -> sin archivos corruptos si hay fallo.
+    Escritura atómica: dump a .tmp y luego replace -> sin archivos corruptos si hay fallo.
     """
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -93,7 +93,7 @@ def atomic_pickle_dump(obj: Any, path: str | Path) -> None:
 
 def normalize_df_for_hash(df: "pd.DataFrame") -> "pd.DataFrame":
     """
-    Normaliza DF para hashing estable: columnasâ†’str, orden filas/cols, â€˜float64â€™ donde aplique.
+    Normaliza DF para hashing estable: columnas→str, orden filas/cols, ‘float64’ donde aplique.
     """
 
     df2 = df.copy()
@@ -121,14 +121,14 @@ DETALLE_OBLIGATORIAS: list[str] = [
 
 
 def ensure_mes_str2(s: pd.Series) -> pd.Series:
-    """Mes en texto 2 dÃ­gitos ('01'..'12')."""
+    """Mes en texto 2 dígitos ('01'..'12')."""
     return s.astype(str).str.zfill(2)
 
 
 def fechentr_from_anio_mes(anio: int, mes):
     """
-    Construye FechEntr como primer dÃ­a del mes (date) a partir de `anio` y `mes`.
-    `mes` puede ser escalar, lista, tupla o pd.Series; valores fuera de [1,12] o no numÃ©ricos -> mes=1.
+    Construye FechEntr como primer día del mes (date) a partir de `anio` y `mes`.
+    `mes` puede ser escalar, lista, tupla o pd.Series; valores fuera de [1,12] o no numéricos -> mes=1.
     """
     # Llevar a Series para vectorizar
     s = mes if isinstance(mes, pd.Series) else pd.Series(mes)
@@ -152,16 +152,16 @@ def attach_campos_largo(
 ) -> pd.DataFrame:
     """
     Reinyecta campos base desde df_largo al df de cambios:
-    - Merge por claves (ItemCode, TipoForecast, OcrCode3, Mes, CardCode) si estÃ¡n presentes,
+    - Merge por claves (ItemCode, TipoForecast, OcrCode3, Mes, CardCode) si están presentes,
       si no, por subset disponible y luego complementa.
     - Si FechEntr faltara tras el merge, la reconstruye desde anio+Mes.
     """
     df_c = df_cambios.copy()
     df_c["Mes"] = ensure_mes_str2(df_c["Mes"])
-    # Determinar claves de merge segÃºn disponibilidad
+    # Determinar claves de merge según disponibilidad
     keys = [k for k in DETALLE_KEYS if k in df_c.columns and k in df_largo.columns]
     if not keys:
-        # mÃ­nimo razonable
+        # mínimo razonable
         keys = [
             k
             for k in ["ItemCode", "TipoForecast", "OcrCode3", "Mes"]
@@ -184,14 +184,14 @@ def attach_campos_largo(
     if "DocCur" not in df_m.columns:
         df_m["DocCur"] = "CLP"
     if "Linea" not in df_m.columns and "OcrCode3" in df_m.columns:
-        # si no tienes mapeo global, mantÃ©n OcrCode3 como Linea
+        # si no tienes mapeo global, mantén OcrCode3 como Linea
         df_m["Linea"] = df_m["OcrCode3"]
 
     if "PrecioUN" not in df_m.columns:
         df_m["PrecioUN"] = 0.0
     df_m["PrecioUN"] = pd.to_numeric(df_m["PrecioUN"], errors="coerce").fillna(0.0)
 
-    # Mes 2 dÃ­gitos
+    # Mes 2 dígitos
     df_m["Mes"] = ensure_mes_str2(df_m["Mes"])
 
     return df_m
@@ -199,12 +199,12 @@ def attach_campos_largo(
 
 def ensure_detalle_schema(df: pd.DataFrame, anio: int) -> pd.DataFrame:
     """
-    Asegura esquema requerido por inserciÃ³n de detalle.
-    - Tipos/campos mÃ­nimos.
+    Asegura esquema requerido por inserción de detalle.
+    - Tipos/campos mínimos.
     - Sin NaN en claves.
     """
     out = df.copy()
-    # Campos faltantes -> aÃ±adir
+    # Campos faltantes -> añadir
     for col in DETALLE_OBLIGATORIAS:
         if col not in out.columns:
             if col == "FechEntr":
@@ -233,7 +233,7 @@ def ensure_detalle_schema(df: pd.DataFrame, anio: int) -> pd.DataFrame:
         if out[k].isna().any():
             raise ValueError(f"[ensure_detalle_schema] Valores nulos en clave '{k}'")
 
-    # Mantener sÃ³lo columnas necesarias + extras Ãºtiles si existen
+    # Mantener sólo columnas necesarias + extras útiles si existen
     cols = [c for c in DETALLE_OBLIGATORIAS if c in out.columns]
     extras = [c for c in out.columns if c not in cols]  # se permiten extras
     return out[cols + extras]

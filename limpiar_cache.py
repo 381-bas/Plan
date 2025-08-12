@@ -1,4 +1,4 @@
-# B_SYS001: Importaciones principales para limpieza de archivos .pyc
+﻿# B_SYS001: Importaciones principales para limpieza de archivos .pyc
 # # ∂B_SYS001/∂B0
 import os
 

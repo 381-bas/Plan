@@ -1,4 +1,4 @@
-# services/snapshot_schema.py
+﻿# services/snapshot_schema.py
 # B_SNAP001: Creación de tablas Snapshot_Forecast y Snapshot_Detalle
 import pandas as pd
 from datetime import date

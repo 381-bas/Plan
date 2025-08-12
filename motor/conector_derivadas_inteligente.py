@@ -1,4 +1,4 @@
-# conector_∂_inteligente.py2 · VERSIÓN REFORZADA
+﻿# conector_∂_inteligente.py2 · VERSIÓN REFORZADA
 # Firma: PRONT · Modo Refactor ♻️
 
 import pandas as pd
