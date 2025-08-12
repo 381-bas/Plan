@@ -34,3 +34,4 @@ risklint_report.md
 *.db
 *.bak
 scans/
+.env
