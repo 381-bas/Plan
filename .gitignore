@@ -33,3 +33,4 @@ risklint_report.md
 *.sqlite
 *.db
 *.bak
+scans/
