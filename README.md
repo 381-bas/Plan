@@ -39,3 +39,4 @@ Workflow **symbios-ci**: instala deps, corre Risk-Lint y pytest (si hay tests).
 ## No versionar
 Ver `.gitignore`: datos, logs, temp, scans/, __pycache__, etc.
  
+ 
