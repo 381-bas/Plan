@@ -1,7 +1,6 @@
-# B_CTX001: Importaciones principales, utilidades y configuración de entorno para núcleo de control
+﻿# B_CTX001: Importaciones principales, utilidades y configuración de entorno para núcleo de control
 # # ∂B_CTX001/∂B0
 import streamlit as st
-import pandas as pd
 from utils.logs.log_operativo import registrar_log_accion
 from core import forecast_tablas
 from utils.db import (
@@ -12,7 +11,7 @@ from utils.db import (
     _run_vendor_select,
     _run_vendor_insert,
     _run_reasig_select,
-    _duplicar_forecast_reasignacion
+    _duplicar_forecast_reasignacion,
 )
 from services.snapshot_schema import (
     actualizar_snapshot_realidad,
@@ -57,9 +56,9 @@ def run():
     # # ∂B_UIX003/∂B0
     with tabs[2]:
         forecast_tablas.run()
-        
+
     # Agrega una nueva pestaña al final de tu lista de tabs
-    with tabs[3]:  
+    with tabs[3]:
         st.header("📸 Snapshot Forecast vs Realidad")
 
         col1, col2 = st.columns([1, 2])
@@ -68,13 +67,16 @@ def run():
                 df_no_forecast = generar_snapshot_completo()
 
                 if not df_no_forecast.empty:
-                    st.warning(f"⚠️ {len(df_no_forecast)} clientes con ventas no tienen forecast:")
+                    st.warning(
+                        f"⚠️ {len(df_no_forecast)} clientes con ventas no tienen forecast:"
+                    )
                     st.dataframe(df_no_forecast, use_container_width=True, height=250)
                 else:
-                    st.success("✅ Todos los clientes con ventas tienen forecast asignado.")
+                    st.success(
+                        "✅ Todos los clientes con ventas tienen forecast asignado."
+                    )
 
                 st.success("Snapshot generado desde Forecast.")
-
 
         with col2:
             if st.button("📊 Actualizar con Ventas Reales"):
@@ -116,13 +118,14 @@ def mostrar_tab_crear_y_ver():
                         )
                         st.success("✅ Producto creado exitosamente")
                         # refrescar listado
-                        productos_df = _run_product_select("SELECT * FROM OITM ORDER BY ItemCode")
+                        productos_df = _run_product_select(
+                            "SELECT * FROM OITM ORDER BY ItemCode"
+                        )
                     except Exception as e:
                         st.error(f"Error al guardar: {e}")
 
         st.markdown("### 📋 Productos existentes")
         st.dataframe(productos_df, use_container_width=True, height=250)
-
 
     # B_MNT003: Gestión de clientes – creación y visualización
     # # ∂B_MNT003/∂B0
@@ -142,7 +145,9 @@ def mostrar_tab_crear_y_ver():
             cardtype = st.selectbox(
                 "Tipo de cliente (CardType)",
                 options=["C", "S", "L"],
-                format_func=lambda x: {"C": "Cliente", "S": "Proveedor", "L": "Lead"}[x],
+                format_func=lambda x: {"C": "Cliente", "S": "Proveedor", "L": "Lead"}[
+                    x
+                ],
             )
             slpcode = st.selectbox(
                 "Vendedor asignado (SlpCode)",
@@ -195,7 +200,9 @@ def mostrar_tab_crear_y_ver():
                             (int(slpcode), slpname),
                         )
                         st.success("✅ Vendedor creado exitosamente")
-                        vendedores_df = _run_vendor_select("SELECT * FROM OSLP ORDER BY SlpCode")
+                        vendedores_df = _run_vendor_select(
+                            "SELECT * FROM OSLP ORDER BY SlpCode"
+                        )
                     except Exception as e:
                         st.error(f"Error al guardar: {e}")
 
@@ -274,7 +281,9 @@ def mostrar_tab_reasignacion():
             return
 
         try:
-            _duplicar_forecast_reasignacion(slp_origen, slp_destino, cardcode_seleccionados)
+            _duplicar_forecast_reasignacion(
+                slp_origen, slp_destino, cardcode_seleccionados
+            )
 
             registrar_log_accion(
                 usuario=st.session_state.get("usuario", "Desconocido"),
@@ -290,8 +299,3 @@ def mostrar_tab_reasignacion():
 
         except Exception as e:
             st.error(f"❌ Error al reasignar forecast: {e}")
-
-
-
-
-

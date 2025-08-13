@@ -1,20 +1,19 @@
-# B_FEN001: Importaciones y carga base de forecast_engine
+﻿# B_FEN001: Importaciones y carga base de forecast_engine
 # # ∂B_FEN001/∂B0
-
 
 
 import pandas as pd
 import logging
-from datetime import datetime
+from datetime import datetime  # noqa: E402,F811
+import os
 from utils.db import (
     _run_forecast_write,
     _run_log_to_sql,
     _run_forecast_insert_get_id,
     DB_PATH,
-    run_query
+    run_query,
 )
 from utils.repositorio_forecast.forecast_writer import validate_delta_schema
-from session_utils import attach_campos_largo, ensure_detalle_schema
 
 
 # Configuración básica del logger local
@@ -25,10 +24,9 @@ if not logger.handlers:
     _hdl.setFormatter(_fmt)
     logger.addHandler(_hdl)
 logger.setLevel(logging.INFO)
+if os.getenv("DEBUG_IMPORTS"):
+    print("📍 forecast_engine.py LOADED desde:", __file__)
 
-
-
-print("📍 forecast_engine.py LOADED desde:", __file__)
 
 # B_FEN002: Inserción de detalle de forecast a SQL (Forecast_Detalle)
 # ∂B_FEN002/∂B1
@@ -44,13 +42,23 @@ def insertar_forecast_detalle(
     """
     import pandas as pd
 
-    print(f"[DEBUG-DETALLE] ▶ Iniciando inserción de detalle para ForecastID={forecast_id}")
+    print(
+        f"[DEBUG-DETALLE] ▶ Iniciando inserción de detalle para ForecastID={forecast_id}"
+    )
     if not forecast_id or forecast_id < 0:
         raise ValueError(f"[ERROR-DETALLE] ❌ ForecastID inválido: {forecast_id}")
 
     required = {
-        "CardCode", "ItemCode", "TipoForecast", "OcrCode3",
-        "Linea", "Cant", "PrecioUN", "DocCur", "SlpCode", "Mes"
+        "CardCode",
+        "ItemCode",
+        "TipoForecast",
+        "OcrCode3",
+        "Linea",
+        "Cant",
+        "PrecioUN",
+        "DocCur",
+        "SlpCode",
+        "Mes",
     }
     missing = required - set(df_detalle.columns)
     if missing:
@@ -61,37 +69,52 @@ def insertar_forecast_detalle(
 
     # Normalización
     df["Mes"] = df["Mes"].astype(str).str.zfill(2)
-    df["Cant"] = pd.to_numeric(df["Cant"], errors="coerce").fillna(0.0).astype("float64")
-    df["PrecioUN"] = pd.to_numeric(df["PrecioUN"], errors="coerce").fillna(0.0).astype("float64")
+    df["Cant"] = (
+        pd.to_numeric(df["Cant"], errors="coerce").fillna(0.0).astype("float64")
+    )
+    df["PrecioUN"] = (
+        pd.to_numeric(df["PrecioUN"], errors="coerce").fillna(0.0).astype("float64")
+    )
 
     # Agrupación defensiva por clave lógica
-    df = (
-        df.groupby(
-            ["CardCode", "ItemCode", "TipoForecast", "OcrCode3",
-             "Mes", "Linea", "DocCur", "SlpCode"],
-            as_index=False
-        ).agg({"Cant": "sum", "PrecioUN": "mean"})
-    )
+    df = df.groupby(
+        [
+            "CardCode",
+            "ItemCode",
+            "TipoForecast",
+            "OcrCode3",
+            "Mes",
+            "Linea",
+            "DocCur",
+            "SlpCode",
+        ],
+        as_index=False,
+    ).agg({"Cant": "sum", "PrecioUN": "mean"})
 
     # Construir FechEntr desde anio+Mes (no depende de una columna previa)
     df["FechEntr"] = pd.to_datetime(
-        df["Mes"].radd(f"{anio}-"),
-        format="%Y-%m",
-        errors="coerce"
+        df["Mes"].radd(f"{anio}-"), format="%Y-%m", errors="coerce"
     ).dt.strftime("%Y-%m-%d")
 
     if df["FechEntr"].isna().any():
         errores = df[df["FechEntr"].isna()]
-        print(f"[ERROR-DETALLE] ❌ FechEntr inválidas detectadas en:")
+        print("[ERROR-DETALLE] ❌ FechEntr inválidas detectadas en:")
         print(errores[["ItemCode", "TipoForecast", "Mes"]].to_string(index=False))
         raise ValueError("Mes inválido: no se pudo construir FechEntr.")
 
     print("[DEBUG-DETALLE] Fechas generadas (FechEntr):")
-    print(df[["ItemCode", "TipoForecast", "FechEntr"]].drop_duplicates().head(5).to_string(index=False))
+    print(
+        df[["ItemCode", "TipoForecast", "FechEntr"]]
+        .drop_duplicates()
+        .head(5)
+        .to_string(index=False)
+    )
 
     # DELETE previos por clave compuesta (ForecastID + Item + Tipo + Ocr + FechEntr)
-    tuplas_delete = [(forecast_id, r.ItemCode, r.TipoForecast, r.OcrCode3, r.FechEntr)
-                     for r in df.itertuples()]
+    tuplas_delete = [
+        (forecast_id, r.ItemCode, r.TipoForecast, r.OcrCode3, r.FechEntr)
+        for r in df.itertuples()
+    ]
     _run_forecast_write(
         """
         DELETE FROM Forecast_Detalle
@@ -101,7 +124,9 @@ def insertar_forecast_detalle(
           AND OcrCode3    = ?
           AND FechEntr    = ?
         """,
-        tuplas_delete, many=True, db_path=db_path,
+        tuplas_delete,
+        many=True,
+        db_path=db_path,
     )
 
     # INSERT nuevos
@@ -131,7 +156,9 @@ def insertar_forecast_detalle(
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        tuplas_insert, many=True, db_path=db_path,
+        tuplas_insert,
+        many=True,
+        db_path=db_path,
     )
 
     # 2️⃣ INSERT nuevos
@@ -166,9 +193,9 @@ def insertar_forecast_detalle(
         db_path=db_path,
     )
 
-    print(f"[DEBUG-DETALLE] ✅ Inserción finalizada correctamente. Total Cantidad: {df['Cant'].sum():,.2f}")
-
-
+    print(
+        f"[DEBUG-DETALLE] ✅ Inserción finalizada correctamente. Total Cantidad: {df['Cant'].sum():,.2f}"
+    )
 
 
 # B_FEN003: Registro de cambios reales en Forecast_LogDetalle desde historial
@@ -186,7 +213,6 @@ def registrar_log_detalle_cambios(
     """Registra delta en Forecast_LogDetalle.
     Si `forecast_id_anterior` es None, asume que no existía versión previa."""
 
-    from datetime import datetime
     from hashlib import sha256
 
     if df_largo.empty:
@@ -202,7 +228,9 @@ def registrar_log_detalle_cambios(
 
     if forecast_id_anterior is None:
         df_work["CantidadAnterior"] = 0
-        print(f"[DEBUG-B2] No hay ForecastID anterior para {cardcode}, se asume CantidadAnterior = 0")
+        print(
+            f"[DEBUG-B2] No hay ForecastID anterior para {cardcode}, se asume CantidadAnterior = 0"
+        )
     else:
         qry = """
             SELECT ItemCode, TipoForecast, OcrCode3,
@@ -219,9 +247,15 @@ def registrar_log_detalle_cambios(
         # 🧪 Detectar claves duplicadas antes del merge
         if df_prev.duplicated(subset=claves).any():
             print("[⚠️ DEBUG-B2] ¡Advertencia! Histórico con claves duplicadas:")
-            print(df_prev[df_prev.duplicated(subset=claves, keep=False)][claves + ["CantidadAnterior"]])
+            print(
+                df_prev[df_prev.duplicated(subset=claves, keep=False)][
+                    claves + ["CantidadAnterior"]
+                ]
+            )
 
-        df_work = df_work.merge(df_prev[claves + ["CantidadAnterior"]], on=claves, how="left")
+        df_work = df_work.merge(
+            df_prev[claves + ["CantidadAnterior"]], on=claves, how="left"
+        )
         df_work["CantidadAnterior"] = df_work["CantidadAnterior"].fillna(0)
 
     df_work["CantidadNueva"] = df_work["Cant"]
@@ -248,11 +282,23 @@ def registrar_log_detalle_cambios(
     print(resumen_tipo.to_string(index=False))
 
     print("[DEBUG-B2] Cambios logueados (preview):")
-    print(df_log[["ItemCode", "TipoForecast", "Mes", "CantidadAnterior", "CantidadNueva"]].head(5).to_string(index=False))
+    print(
+        df_log[["ItemCode", "TipoForecast", "Mes", "CantidadAnterior", "CantidadNueva"]]
+        .head(5)
+        .to_string(index=False)
+    )
 
     columnas = [
-        "ForecastID", "SlpCode", "CardCode", "ItemCode", "TipoForecast",
-        "OcrCode3", "Mes", "CantidadAnterior", "CantidadNueva", "Timestamp"
+        "ForecastID",
+        "SlpCode",
+        "CardCode",
+        "ItemCode",
+        "TipoForecast",
+        "OcrCode3",
+        "Mes",
+        "CantidadAnterior",
+        "CantidadNueva",
+        "Timestamp",
     ]
     df_log["ForecastID"] = forecast_id  # ✅ Cambiado: el log pertenece al nuevo ID
 
@@ -266,12 +312,7 @@ def registrar_log_detalle_cambios(
     return df_log[columnas]
 
 
-
-
-
-
-from datetime import datetime
-from utils.db import _run_forecast_insert_get_id, DB_PATH
+from utils.db import _run_forecast_insert_get_id, DB_PATH  # noqa: E402,F811
 
 
 # B_FEN004: Inserción de cabecera Forecast (SlpCode + Fecha_Carga)
@@ -285,36 +326,14 @@ def registrar_forecast_cabecera(
     return _run_forecast_insert_get_id(sql, (slpcode, ahora))
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # B_HELP001: obtiene o crea ForecastID reutilizable
 def obtener_forecast_activo(
-        slpcode: int,
-        cardcode: str,
-        anio: int,
-        db_path: str = DB_PATH,
-        *,
-        force_new: bool = False,
+    slpcode: int,
+    cardcode: str,
+    anio: int,
+    db_path: str = DB_PATH,
+    *,
+    force_new: bool = False,
 ) -> int:
     """
     Devuelve un ForecastID único por cliente y día.
@@ -330,6 +349,3 @@ def obtener_forecast_activo(
     forecast_id = registrar_forecast_cabecera(slpcode, db_path)
     st.session_state[llave] = forecast_id
     return forecast_id
-
-
-

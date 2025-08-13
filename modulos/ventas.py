@@ -1,4 +1,4 @@
-# B_VIN001: Inicio simbiótico y dominio SCANNER para ventas.py
+﻿# B_VIN001: Inicio simbiótico y dominio SCANNER para ventas.py
 # # ∂B_VIN001/∂B0
 """
 Este archivo inicia bajo dominio total de SCANNER.
@@ -7,31 +7,29 @@ Toda función será estructural, reversible y trazable.
 
 # B_VIN002: Importaciones fundacionales y dependencias funcionales para ventas
 # # ∂B_VIN002/∂B0
-import streamlit as st                         
-import pandas as pd                                 
+import streamlit as st
+import pandas as pd
 from streamlit import column_config
-from datetime import datetime
 
-from config.contexto import obtener_anio                 # ∂
-from core.consultas_forecast import (                   
-    obtener_clientes,                                   # ∂B
-    obtener_forecast_editable                           # ∂B
+from config.contexto import obtener_anio  # ∂
+from core.consultas_forecast import (
+    obtener_clientes,  # ∂B
+    obtener_forecast_editable,  # ∂B
 )
 from utils.alertas import (
     render_alertas_forecast,
 )
 from utils.repositorio_forecast.repositorio_forecast_editor import (
-    obtener_buffer_cliente,                             # ∂B
-    inicializar_buffer_cliente,                         # ∂B
-    validar_forecast_dataframe,                         # ∂B
-    sincronizar_buffer_edicion,                         # ∂B
-    actualizar_buffer_global,                           # ∂B
-    sincronizar_buffer_local                            # ∂B
+    obtener_buffer_cliente,  # ∂B
+    inicializar_buffer_cliente,  # ∂B
+    validar_forecast_dataframe,  # ∂B
+    sincronizar_buffer_edicion,  # ∂B
+    actualizar_buffer_global,  # ∂B
+    sincronizar_buffer_local,  # ∂B
 )
-from utils.repositorio_forecast.forecast_writer import detectar_cambios_buffer  # ∂B        
 from utils.utils_buffers import (
     guardar_todos_los_clientes_editados,
-    sincronizar_para_guardado_final
+    sincronizar_para_guardado_final,
 )
 from utils.db import DB_PATH
 from services.sync import guardar_temp_local
@@ -41,12 +39,8 @@ from modulos.ventas_facturas_snippet import mostrar_facturas
 # B_HDF001: Normalización profunda de DataFrame para comparación estructural
 # # ∂B_HDF001/∂B0
 def normalizar_df(df: pd.DataFrame) -> pd.DataFrame:
-    return (
-        df.sort_index(axis=0)
-          .sort_index(axis=1)
-          .astype("float64")
-          .fillna(0)
-    )
+    return df.sort_index(axis=0).sort_index(axis=1).astype("float64").fillna(0)
+
 
 # B_HDF002: Generación de hash semántico robusto para buffers editables
 # # ∂B_HDF002/∂B0
@@ -57,17 +51,21 @@ def hash_df(df: pd.DataFrame) -> int:
     df_num = df_num.sort_index(axis=0).sort_index(axis=1)
     return pd.util.hash_pandas_object(df_num, index=True).sum()
 
+
 # B_VFO001: Editor visual controlado y selección de cliente para forecast editable
 # # ∂B_VFO001/∂B0
 def vista_forecast(slpcode, cardcode):
     # 1️⃣  ─────────────────────  HEADER UI  ─────────────────────
-    st.markdown("""
+    st.markdown(
+        """
         <style>
             .block-container { padding-top: 4rem !important; }
             .titulo-ajustado  { margin: .5rem 0 1rem; font-size: 1.2rem; font-weight: 500; }
         </style>
         <div class="titulo-ajustado">🧬 Editor Forecast Cantidad / Precio</div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
     # -----------------------------------------------------------------
     # 2️⃣  ───────────  Validación de query-param / vendedor  ───────────
@@ -94,7 +92,7 @@ def vista_forecast(slpcode, cardcode):
             "Cliente:",
             clientes["CardCode"],
             format_func=lambda x: f"{x} - {clientes.loc[clientes['CardCode'] == x, 'Nombre'].values[0]}",
-            key="cliente_selectbox"
+            key="cliente_selectbox",
         )
 
     anio = obtener_anio()
@@ -121,9 +119,8 @@ def vista_forecast(slpcode, cardcode):
             .first()
             .reset_index()
         )
-        df_buffer = (
-            df_buffer.drop(columns=["PrecioUN"])
-            .merge(precios, on=["ItemCode", "TipoForecast"], how="left")
+        df_buffer = df_buffer.drop(columns=["PrecioUN"]).merge(
+            precios, on=["ItemCode", "TipoForecast"], how="left"
         )
 
     with col2:
@@ -142,11 +139,19 @@ def vista_forecast(slpcode, cardcode):
         else df_buffer.copy()
     )
 
-    campos_fijos = ["ItemCode", "ItemName", "TipoForecast", "OcrCode3", "DocCur", "Métrica"]
-    columnas_ordenadas = campos_fijos + [c for c in df_filtrado.columns if c not in campos_fijos]
-    df_filtrado = (
-        df_filtrado[columnas_ordenadas]
-        .sort_values(["ItemCode", "TipoForecast", "Métrica"])
+    campos_fijos = [
+        "ItemCode",
+        "ItemName",
+        "TipoForecast",
+        "OcrCode3",
+        "DocCur",
+        "Métrica",
+    ]
+    columnas_ordenadas = campos_fijos + [
+        c for c in df_filtrado.columns if c not in campos_fijos
+    ]
+    df_filtrado = df_filtrado[columnas_ordenadas].sort_values(
+        ["ItemCode", "TipoForecast", "Métrica"]
     )
 
     # -----------------------------------------------------------------
@@ -168,7 +173,7 @@ def vista_forecast(slpcode, cardcode):
         df_filtrado,
         key=f"editor_forecast_{cardcode}",
         use_container_width=True,
-        num_rows="fixed",   # "dynamic" para agregar Item´s nuevos a la tabla
+        num_rows="fixed",  # "dynamic" para agregar Item´s nuevos a la tabla
         height=len(df_filtrado) * 35 + 40,  # sin límite superior
         column_order=columnas_ordenadas,
         column_config=column_config_forecast,
@@ -232,12 +237,12 @@ def vista_forecast(slpcode, cardcode):
         if st.button("💾 Guardar forecast en base de datos"):
             try:
                 sincronizar_para_guardado_final(
-                    key_buffer=key_buffer,
-                    df_editado=df_editado
+                    key_buffer=key_buffer, df_editado=df_editado
                 )
                 guardar_todos_los_clientes_editados(anio, DB_PATH)
             except Exception as e:
                 st.error(f"❌ Error durante el guardado: {e}")
+
 
 # B_STK001: Visualización de stock disponible para cliente/usuario
 # # ∂B_STK001/∂B0
@@ -245,25 +250,26 @@ def vista_stock(slpcode, cardcode):
     st.markdown("### 📦 Stock disponible")
     st.info("Aquí se mostrará el stock actual por SKU.")
 
+
 # B_HST001: Visualización de ventas históricas para cliente/usuario
 # # ∂B_HST001/∂B0
 def vista_historico(slpcode, cardcode):
     st.markdown("### 📈 Ventas Históricas")
     st.info("Aquí se mostrarán las ventas.")
 
+
 # B_AYD001: Visualización de ayuda e instrucciones para el usuario
 # # ∂B_AYD001/∂B0
 def vista_ayuda():
     st.markdown("### 🧠 Ayuda e Instrucciones")
-    st.info("""
+    st.info(
+        """
     - Puedes editar cantidades y precios directamente.
     - Usa los filtros de producto si hay muchos ítems.
     - Verifica que 'Firme' y 'Proyectado' estén bien separados.
     - Al finalizar, guarda los cambios desde el botón inferior.
-    """)
-
-
-
+    """
+    )
 
 
 # B_RUN001: Ejecutor principal de tabs en ventas.py
@@ -276,9 +282,16 @@ def run():
         print(f"[SYMBIOS][ventas] Error en bloque línea 275: {e}")
         raise
 
-    tabs = st.tabs([
-        "📋 Forecast", "📦 Stock", "📈 Histórico", "🧠 Ayuda", "🚨 Alertas Forecast", "📑 Facturas"
-    ])
+    tabs = st.tabs(
+        [
+            "📋 Forecast",
+            "📦 Stock",
+            "📈 Histórico",
+            "🧠 Ayuda",
+            "🚨 Alertas Forecast",
+            "📑 Facturas",
+        ]
+    )
 
     with tabs[0]:
         vista_forecast(slpcode, None)
@@ -292,10 +305,3 @@ def run():
         render_alertas_forecast(slpcode)
     with tabs[5]:
         mostrar_facturas()
-
-        
-
-
-
-
-

@@ -1,4 +1,4 @@
-"""utils/db.py – núcleo flexible E1+legacy
+﻿"""utils/db.py – núcleo flexible E1+legacy
 ================================================
 Este módulo centraliza el acceso a SQLite siguiendo RATUC‑F.
 Provide flexible helper functions that support both legacy and new call signatures so that no downstream code breaks while we migrate.
@@ -9,8 +9,8 @@ from __future__ import annotations
 import sqlite3
 import pandas as pd
 import time
-from functools import partial, wraps
-from typing import Any, Callable, Iterable, List, Tuple
+from functools import wraps
+from typing import Any, Callable, List, Tuple
 
 # ---------------------------------------------------------------------------
 # 📌 Configuración global
@@ -22,6 +22,7 @@ DB_PATH: str = (
 # ---------------------------------------------------------------------------
 # 🔑 Núcleo limpio (lectura / escritura)
 # ---------------------------------------------------------------------------
+
 
 def run_query(sql: str, *args: Any, **kwargs: Any) -> pd.DataFrame:  # noqa: C901
     """Ejecuta un SELECT y devuelve un **pandas.DataFrame**.
@@ -85,11 +86,15 @@ def _execute_write(
         (conn.executemany if many else conn.execute)(sql, params)  # type: ignore[arg-type]
         conn.commit()
 
+
 # ---------------------------------------------------------------------------
 # 🔄 Decorador de reintento (bloqueo)
 # ---------------------------------------------------------------------------
 
-def retry_sql_locked(max_attempts: int = 5, delay: float = 0.4) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+
+def retry_sql_locked(
+    max_attempts: int = 5, delay: float = 0.4
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Reintenta cuando la base está bloqueada (*database is locked*)."""
 
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -99,7 +104,10 @@ def retry_sql_locked(max_attempts: int = 5, delay: float = 0.4) -> Callable[[Cal
                 try:
                     return fn(*a, **kw)
                 except sqlite3.OperationalError as exc:  # pragma: no cover
-                    if "database is locked" in str(exc).lower() and attempt < max_attempts - 1:
+                    if (
+                        "database is locked" in str(exc).lower()
+                        and attempt < max_attempts - 1
+                    ):
                         time.sleep(delay)
                     else:
                         raise
@@ -108,34 +116,58 @@ def retry_sql_locked(max_attempts: int = 5, delay: float = 0.4) -> Callable[[Cal
 
     return decorator
 
+
 # utils/db.py  (o el módulo donde se declaren los wrappers)
 # ──────────────────────────────────────────────────────────
 def _run_forecast_select(
-        sql: str,
-        params: tuple | None = None,
-        db_path: str = DB_PATH
+    sql: str, params: tuple | None = None, db_path: str = DB_PATH
 ) -> pd.DataFrame:
     """Select genérico (mantiene API antigua, añade db_path opcional)."""
     return run_query(sql, db_path, params=params or ())
 
-# Idéntico patrón para _run_admin_select, _run_product_select, etc.
 
+# Idéntico patrón para _run_admin_select, _run_product_select, etc.
 
 
 # ---------------------------------------------------------------------------
 # 🧩 Wrappers por flujo (alias → núcleo)
 #   Conservan nombres históricos para cero breaking‑changes
 # ---------------------------------------------------------------------------
-_run_admin_select = lambda sql, params=None: run_query(sql, params=params or ())
+def _run_admin_select(sql, params=None):
+    return run_query(sql, params=params or ())
 
-_run_product_select = lambda sql, params=None: run_query(sql, params=params or ())
-_run_client_select = lambda sql, params=None: run_query(sql, params=params or ())
-_run_vendor_select = lambda sql, params=None: run_query(sql, params=params or ())
-_run_reasig_select = lambda sql, params=None: run_query(sql, params=params or ())
-_run_cf_select = lambda sql, params=None: run_query(sql, params=params or ())
-_run_tab_select = lambda sql, params=None: run_query(sql, params=params or ())
-_run_gestion_select = lambda sql, params=None: run_query(sql, params=params or ())
-_run_home_select = lambda sql, params=None: run_query(sql, params=params or ())
+
+def _run_product_select(sql, params=None):
+    return run_query(sql, params=params or ())
+
+
+def _run_client_select(sql, params=None):
+    return run_query(sql, params=params or ())
+
+
+def _run_vendor_select(sql, params=None):
+    return run_query(sql, params=params or ())
+
+
+def _run_reasig_select(sql, params=None):
+    return run_query(sql, params=params or ())
+
+
+def _run_cf_select(sql, params=None):
+    return run_query(sql, params=params or ())
+
+
+def _run_tab_select(sql, params=None):
+    return run_query(sql, params=params or ())
+
+
+def _run_gestion_select(sql, params=None):
+    return run_query(sql, params=params or ())
+
+
+def _run_home_select(sql, params=None):
+    return run_query(sql, params=params or ())
+
 
 # -- escrituras --
 _run_admin_insert = _execute_write
@@ -148,6 +180,7 @@ _run_vendor_insert = _execute_write
 # 🏷️  Wrappers con lógica dedicada
 # ---------------------------------------------------------------------------
 
+
 def _run_log_to_sql(df: pd.DataFrame, table: str, *, db_path: str = DB_PATH) -> None:
     """Carga un DataFrame en *table* (append) si no está vacío."""
     if df.empty:
@@ -156,7 +189,9 @@ def _run_log_to_sql(df: pd.DataFrame, table: str, *, db_path: str = DB_PATH) -> 
         df.to_sql(table, conn, if_exists="append", index=False)
 
 
-def _run_forecast_insert_get_id(sql: str, params: Tuple[Any, ...], *, timeout: int = 15) -> int:
+def _run_forecast_insert_get_id(
+    sql: str, params: Tuple[Any, ...], *, timeout: int = 15
+) -> int:
     """INSERT y devuelve `lastrowid`."""
     with sqlite3.connect(DB_PATH, timeout=timeout, isolation_level="DEFERRED") as conn:
         cursor = conn.execute(sql, params)
@@ -165,7 +200,9 @@ def _run_forecast_insert_get_id(sql: str, params: Tuple[Any, ...], *, timeout: i
 
 
 @retry_sql_locked()
-def _run_log_write(sql: str, params: Tuple[Any, ...], *, db_path: str = DB_PATH) -> None:  # noqa: D401
+def _run_log_write(
+    sql: str, params: Tuple[Any, ...], *, db_path: str = DB_PATH
+) -> None:  # noqa: D401
     """INSERT/UPDATE con reintento cuando la base esté bloqueada."""
     with sqlite3.connect(db_path, timeout=15) as conn:
         conn.execute(sql, params)
@@ -219,6 +256,7 @@ def _duplicar_forecast_reasignacion(
         except Exception:
             conn.rollback()
             raise
+
 
 # ---------------------------------------------------------------------------
 # ✨ API pública

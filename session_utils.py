@@ -1,8 +1,9 @@
-# session_utils.py
+﻿# session_utils.py
 from __future__ import annotations
 from pathlib import Path
 from typing import Any
-import io, pickle
+import io
+import pickle
 import pandas as pd
 import numpy as np
 
@@ -10,13 +11,15 @@ import numpy as np
 # # ∂B_TMP001/∂B0
 
 
-
-
 try:
     import streamlit as st
 except Exception:  # permite importar sin Streamlit en tests
-    class _Dummy: session_state = {}
+
+    class _Dummy:
+        session_state = {}
+
     st = _Dummy()
+
 
 def set_slpcode(value: int) -> None:
     """Set SlpCode de forma canónica y mantiene back-compat 'slpcode'."""
@@ -24,9 +27,12 @@ def set_slpcode(value: int) -> None:
     st.session_state["SlpCode"] = v
     st.session_state["slpcode"] = v  # compat temporal
 
+
 def get_slpcode(default: int = 999) -> int:
     """Lee SlpCode de forma robusta."""
-    return int(st.session_state.get("SlpCode", st.session_state.get("slpcode", default)))
+    return int(
+        st.session_state.get("SlpCode", st.session_state.get("slpcode", default))
+    )
 
 
 class _RestrictedUnpickler(pickle.Unpickler):
@@ -34,21 +40,32 @@ class _RestrictedUnpickler(pickle.Unpickler):
     Unpickler con lista blanca para deserializar objetos seguros (DF/Series/ndarray y builtins).
     Evita code execution vía pickle.
     """
+
     _ALLOWED = {
-        ("builtins", "set"), ("builtins", "dict"), ("builtins", "list"),
-        ("builtins", "tuple"), ("builtins", "str"), ("builtins", "int"),
-        ("builtins", "float"), ("builtins", "bool"), ("builtins", "NoneType"),
-        ("pandas.core.frame", "DataFrame"), ("pandas.core.series", "Series"),
+        ("builtins", "set"),
+        ("builtins", "dict"),
+        ("builtins", "list"),
+        ("builtins", "tuple"),
+        ("builtins", "str"),
+        ("builtins", "int"),
+        ("builtins", "float"),
+        ("builtins", "bool"),
+        ("builtins", "NoneType"),
+        ("pandas.core.frame", "DataFrame"),
+        ("pandas.core.series", "Series"),
         ("numpy", "ndarray"),
     }
+
     def find_class(self, module, name):
         if (module, name) in self._ALLOWED:
             return super().find_class(module, name)
         raise ValueError(f"Objeto no permitido al unpickle: {module}.{name}")
 
+
 def restricted_unpickle(fp: io.BufferedReader) -> Any:
     """Carga ‘pickle’ con lista blanca de tipos permitidos."""
     return _RestrictedUnpickler(fp).load()
+
 
 def safe_pickle_load(path: str | Path, allowed_dir: str | Path) -> Any:
     """
@@ -61,6 +78,7 @@ def safe_pickle_load(path: str | Path, allowed_dir: str | Path) -> Any:
     with open(p, "rb") as f:
         return restricted_unpickle(f)
 
+
 def atomic_pickle_dump(obj: Any, path: str | Path) -> None:
     """
     Escritura atómica: dump a .tmp y luego replace -> sin archivos corruptos si hay fallo.
@@ -72,11 +90,12 @@ def atomic_pickle_dump(obj: Any, path: str | Path) -> None:
         pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
     tmp.replace(p)
 
+
 def normalize_df_for_hash(df: "pd.DataFrame") -> "pd.DataFrame":
     """
     Normaliza DF para hashing estable: columnas→str, orden filas/cols, ‘float64’ donde aplique.
     """
-    import pandas as pd
+
     df2 = df.copy()
     df2.columns = df2.columns.astype(str)
     df2 = df2.sort_index(axis=1).sort_index()
@@ -87,13 +106,24 @@ def normalize_df_for_hash(df: "pd.DataFrame") -> "pd.DataFrame":
 DETALLE_KEYS: list[str] = ["ItemCode", "TipoForecast", "OcrCode3", "Mes", "CardCode"]
 
 DETALLE_OBLIGATORIAS: list[str] = [
-    "ItemCode", "TipoForecast", "OcrCode3", "Linea", "DocCur",
-    "Mes", "FechEntr", "Cant", "PrecioUN", "CardCode", "SlpCode"
+    "ItemCode",
+    "TipoForecast",
+    "OcrCode3",
+    "Linea",
+    "DocCur",
+    "Mes",
+    "FechEntr",
+    "Cant",
+    "PrecioUN",
+    "CardCode",
+    "SlpCode",
 ]
+
 
 def ensure_mes_str2(s: pd.Series) -> pd.Series:
     """Mes en texto 2 dígitos ('01'..'12')."""
     return s.astype(str).str.zfill(2)
+
 
 def fechentr_from_anio_mes(anio: int, mes):
     """
@@ -108,12 +138,18 @@ def fechentr_from_anio_mes(anio: int, mes):
     s_num = s_num.where((s_num >= 1) & (s_num <= 12))  # fuera de rango -> NaN
     s_num = s_num.fillna(1).astype(int)
 
-    ym = pd.Series(int(anio)).astype(str) + "-" + s_num.astype(int).astype(str).str.zfill(2)
+    ym = (
+        pd.Series(int(anio)).astype(str)
+        + "-"
+        + s_num.astype(int).astype(str).str.zfill(2)
+    )
     dt = pd.to_datetime(ym + "-01", format="%Y-%m-%d", errors="coerce")
     return dt.dt.date
 
 
-def attach_campos_largo(df_cambios: pd.DataFrame, df_largo: pd.DataFrame, anio: int) -> pd.DataFrame:
+def attach_campos_largo(
+    df_cambios: pd.DataFrame, df_largo: pd.DataFrame, anio: int
+) -> pd.DataFrame:
     """
     Reinyecta campos base desde df_largo al df de cambios:
     - Merge por claves (ItemCode, TipoForecast, OcrCode3, Mes, CardCode) si están presentes,
@@ -126,7 +162,11 @@ def attach_campos_largo(df_cambios: pd.DataFrame, df_largo: pd.DataFrame, anio: 
     keys = [k for k in DETALLE_KEYS if k in df_c.columns and k in df_largo.columns]
     if not keys:
         # mínimo razonable
-        keys = [k for k in ["ItemCode", "TipoForecast", "OcrCode3", "Mes"] if k in df_c.columns and k in df_largo.columns]
+        keys = [
+            k
+            for k in ["ItemCode", "TipoForecast", "OcrCode3", "Mes"]
+            if k in df_c.columns and k in df_largo.columns
+        ]
     df_m = df_c.merge(
         df_largo[
             [c for c in df_largo.columns if c in (DETALLE_OBLIGATORIAS + DETALLE_KEYS)]
@@ -156,6 +196,7 @@ def attach_campos_largo(df_cambios: pd.DataFrame, df_largo: pd.DataFrame, anio: 
 
     return df_m
 
+
 def ensure_detalle_schema(df: pd.DataFrame, anio: int) -> pd.DataFrame:
     """
     Asegura esquema requerido por inserción de detalle.
@@ -183,8 +224,9 @@ def ensure_detalle_schema(df: pd.DataFrame, anio: int) -> pd.DataFrame:
     if out["FechEntr"].dtype == object:
         # Si ya viene en 'YYYY-MM' o 'YYYY-MM-DD', normalizamos a YYYY-MM-01
         fe = out["FechEntr"].astype(str).str.slice(0, 7)  # YYYY-MM
-        out["FechEntr"] = pd.to_datetime(fe + "-01", format="%Y-%m-%d", errors="coerce").dt.date
-
+        out["FechEntr"] = pd.to_datetime(
+            fe + "-01", format="%Y-%m-%d", errors="coerce"
+        ).dt.date
 
     # Validar claves no nulas
     for k in ["ItemCode", "TipoForecast", "OcrCode3", "Mes", "CardCode"]:

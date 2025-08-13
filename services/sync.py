@@ -1,6 +1,6 @@
-# B_TMP001: Importaciones y configuración de base temporal para backups de edición
+﻿# B_TMP001: Importaciones y configuración de base temporal para backups de edición
 # # ∂B_TMP001/∂B0
-import os, pickle
+import os
 import pandas as pd
 import hashlib
 from pathlib import Path
@@ -10,15 +10,20 @@ from session_utils import normalize_df_for_hash, safe_pickle_load, atomic_pickle
 BASE_TEMP = os.path.join(os.path.dirname(__file__), "..", "temp_ediciones")
 os.makedirs(BASE_TEMP, exist_ok=True)
 
+
 # B_TMP002: Construcción de ruta de backup temporal para cliente
 # # ∂B_TMP002/∂B0
 def _ruta_temp(cliente: str) -> str:
     return os.path.join(BASE_TEMP, f"{cliente}_forecast.pkl")
 
+
 # B_HDF001: Hash robusto de DataFrame usando SHA-256 (control de integridad)
 # # ∂B_HDF001/∂B0
 def hash_df(df):
-    return hashlib.sha256(pd.util.hash_pandas_object(df.sort_index(axis=1), index=True).values).hexdigest()
+    return hashlib.sha256(
+        pd.util.hash_pandas_object(df.sort_index(axis=1), index=True).values
+    ).hexdigest()
+
 
 # B_NRM001: Normalización selectiva de columnas numéricas para hashing
 # # ∂B_NRM001/∂B0
@@ -35,6 +40,7 @@ def _normalizar_hash(df_: pd.DataFrame) -> pd.DataFrame:
         df_copia[col] = pd.to_numeric(df_copia[col], errors="coerce").fillna(0)
 
     return df_copia.sort_index(axis=0).sort_index(axis=1)
+
 
 # B_TMP003: Guardado seguro de backup temporal (.pkl) del DataFrame de cliente
 # # ∂B_TMP003/∂B0

@@ -1,27 +1,27 @@
-# B_CTX001: Importaciones principales y obtención de contexto para el forecast inverso
+﻿# B_CTX001: Importaciones principales y obtención de contexto para el forecast inverso
 # # ∂B_CTX001/∂B0
 import streamlit as st
-import pandas as pd
-from config.contexto import obtener_anio
+
 from utils.db import (
     _run_home_select,
-)    
-
-
+)
 
 
 # B_RUN001: Ejecutor principal – Visualización y navegación de módulos de Quimick
 # # ∂B_RUN001/∂B0
 def run():
-    
-    st.markdown("""
+
+    st.markdown(
+        """
         <style>
             .block-container {
                 padding-top: 1rem !important;
             }
         </style>
-    """, unsafe_allow_html=True)
-    
+    """,
+        unsafe_allow_html=True,
+    )
+
     st.title("🧬 Quimick")
     st.caption("Selecciona un módulo para comenzar o edita tu forecast existente")
 
@@ -51,9 +51,6 @@ def run():
     # # ∂B_UIX002/∂B0
     st.subheader("🗓️ Forecast cargado por cliente")
 
- 
-    anio = obtener_anio()
-
     try:
         query = """
             SELECT DISTINCT f.SlpCode, o.SlpName
@@ -63,12 +60,11 @@ def run():
         """
         df_vendedores = _run_home_select(query)
 
-
         for _, row in df_vendedores.iterrows():
             col1, col2 = st.columns([1, 5])
             with col1:
                 if st.button("✍️ Ir", key=f"btn_{row['SlpCode']}"):
-                    st.query_params.update(modulo="ventas", vendedor=row['SlpCode'])
+                    st.query_params.update(modulo="ventas", vendedor=row["SlpCode"])
                     st.rerun()
             with col2:
                 st.markdown(f"**{row['SlpCode']} – {row['SlpName']}**")

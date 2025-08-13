@@ -1,3 +1,5 @@
+﻿import utils.pickle_adapter  # noqa: F401  # habilita Parquet si BACKUP_FMT=parquet
+
 # B_BCK001: Importaciones principales para backup y manejo de archivos
 # # ∂B_BCK001/∂B0
 import os

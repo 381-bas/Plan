@@ -1,3 +1,5 @@
+﻿import utils.pickle_adapter  # noqa: F401  # habilita Parquet si BACKUP_FMT=parquet
+
 # B_CTX001: Importaciones principales y configuración de contexto base para SYMBIOS
 # # ∂B_CTX001/∂B0
 import streamlit as st
@@ -6,18 +8,16 @@ from utils.logs.log_operativo import registrar_log_accion
 from config.router import cargar_modulo_si_valido
 
 
-
 # B_UIX001: Configuración visual inicial y aplicación de estilo base (blanco y negro)
 # # ∂B_UIX001/∂B0
 st.set_page_config(page_title="Plan", layout="wide")
 
 
-
 # ---------- Captura de parámetros URL ----------
-params = st.query_params.to_dict()        # ← API estable
+params = st.query_params.to_dict()  # ← API estable
 
 # Ej.: http://host:8501/?modulo=ventas&vendedor=3
-modulo   = params.get("modulo")
+modulo = params.get("modulo")
 vendedor = params.get("vendedor")
 
 if modulo:
@@ -29,14 +29,13 @@ if vendedor:
 if "modulo" not in st.session_state:
     st.session_state["modulo"] = "inicio"  # página home
 
-    
-
 
 # Aplicar estilo blanco y negro
 ACTIVAR_ESTILO = False
 
 if ACTIVAR_ESTILO:
-    st.markdown("""
+    st.markdown(
+        """
         <style>
             html, body, .block-container {
                 background-color: white !important;
@@ -47,17 +46,17 @@ if ACTIVAR_ESTILO:
                 background-color: white !important;
             }
         </style>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
-#params = st.query_params.to_dict()
-#modulo = params.get("modulo")
-#vendedor = params.get("vendedor")
-
-
-modulo    = st.session_state["modulo"]
-vendedor  = st.session_state.get("vendedor")   # puede ser None
+# params = st.query_params.to_dict()
+# modulo = params.get("modulo")
+# vendedor = params.get("vendedor")
 
 
+modulo = st.session_state["modulo"]
+vendedor = st.session_state.get("vendedor")  # puede ser None
 
 
 # B_CTX002: Asignación de usuario por defecto si no hay sesión activa
@@ -84,8 +83,10 @@ if not modulo:
                 asignar_usuario_desde_sesion(vendedor_param)
                 slpcode = st.session_state.get("SlpCode", 999)
             else:
-                st.warning("⚠️ No se pudo detectar un SlpCode válido. Usando modo prueba.")
-        
+                st.warning(
+                    "⚠️ No se pudo detectar un SlpCode válido. Usando modo prueba."
+                )
+
         st.query_params.update(modulo="ventas", vendedor=slpcode)
     else:
         st.query_params.update(modulo="inicio")
@@ -97,7 +98,7 @@ registrar_log_accion(
     usuario=st.session_state.get("usuario", "Anonimo"),
     accion="acceso_modulo",
     modulo=modulo or "inicio",
-    detalle="Ingreso vía query_params"
+    detalle="Ingreso vía query_params",
 )
 
 # B_ROUT002: Carga dinámica del módulo si es válido

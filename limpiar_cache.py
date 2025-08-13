@@ -1,6 +1,7 @@
-# B_SYS001: Importaciones principales para limpieza de archivos .pyc
+﻿# B_SYS001: Importaciones principales para limpieza de archivos .pyc
 # # ∂B_SYS001/∂B0
 import os
+
 
 # B_SYS002: Función para limpiar archivos .pyc de forma recursiva en un directorio base
 # # ∂B_SYS002/∂B0
@@ -21,6 +22,7 @@ def limpiar_pyc(ruta_base: str):
     print(f"Total eliminados: {len(eliminados)} archivos")
     for e in eliminados:
         print("🗑️", e)
+
 
 # B_SYS003: Ejecución directa de limpieza en ruta específica
 # # ∂B_SYS003/∂B0

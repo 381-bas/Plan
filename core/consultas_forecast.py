@@ -1,13 +1,9 @@
-# B_FCS001: Importaciones y configuración de base de datos para consultas forecast
+﻿# B_FCS001: Importaciones y configuración de base de datos para consultas forecast
 # # ∂B_FCS001/∂B0
 import pandas as pd
 from utils.db import run_query
 from typing import Any
-from utils.db import (
-    DB_PATH,
-    _run_cf_select
-)
-from typing import Optional
+from utils.db import DB_PATH, _run_cf_select
 
 
 # B_FCS002: Obtener lista de vendedores activos
@@ -21,6 +17,7 @@ def obtener_vendedores(db_path=DB_PATH):
     """
     return run_query(query, db_path)
 
+
 # B_FCS003: Obtener clientes asociados a un vendedor
 # # ∂B_FCS003/∂B0
 def obtener_clientes(slpcode, db_path=DB_PATH):
@@ -33,6 +30,7 @@ def obtener_clientes(slpcode, db_path=DB_PATH):
     ORDER BY fd.CardCode
     """
     return run_query(query, db_path, (slpcode,))
+
 
 # B_FCS004: Obtener forecast histórico detallado por vendedor y cliente
 # # ∂B_FCS004/∂B0
@@ -48,6 +46,7 @@ def obtener_forecast_historico(slp_code, card_code, db_path=DB_PATH):
     ORDER BY fd.FechEntr
     """
     return run_query(query, db_path, (slp_code, card_code))
+
 
 # B_FCS005: Obtener forecast editable para edición directa por cliente
 # ∂B_FCS005/∂B0
@@ -140,42 +139,45 @@ def obtener_forecast_editable(
     # ─────────────────── parámetros en el mismo orden que los ? ────────────────────
     params: list[Any] = [slp_code, card_code]
     if anio:
-        params.append(str(anio))   # CTE base
-    params.append(card_code)       # WHERE final
+        params.append(str(anio))  # CTE base
+    params.append(card_code)  # WHERE final
     if anio:
-        params.append(str(anio))   # WHERE final
+        params.append(str(anio))  # WHERE final
 
     df = run_query(query, db_path, tuple(params))
 
     # ────────────────────────────── pivot + enriquecimiento ──────────────────────────
     if df.empty:
-        return pd.DataFrame(columns=[
-            "ItemCode", "ItemName", "TipoForecast", "Métrica",
-            "OcrCode3", "PrecioUN", "DocCur",
-            *[str(m).zfill(2) for m in range(1, 13)],
-        ])
-
-    pivot = (
-        df.pivot_table(
-            index=["ItemCode", "ItemName", "TipoForecast", "OcrCode3"],
-            columns="Mes",
-            values="Cantidad",
-            fill_value=0,
+        return pd.DataFrame(
+            columns=[
+                "ItemCode",
+                "ItemName",
+                "TipoForecast",
+                "Métrica",
+                "OcrCode3",
+                "PrecioUN",
+                "DocCur",
+                *[str(m).zfill(2) for m in range(1, 13)],
+            ]
         )
-        .reset_index()
-    )
+
+    pivot = df.pivot_table(
+        index=["ItemCode", "ItemName", "TipoForecast", "OcrCode3"],
+        columns="Mes",
+        values="Cantidad",
+        fill_value=0,
+    ).reset_index()
 
     # PrecioUN y DocCur (una sola fila por clave ⇒ avg / first son seguros)
-    precio_un = df.groupby(
-        ["ItemCode", "TipoForecast", "OcrCode3"], as_index=False
-    )["PrecioUN"].mean()
-    doc_cur = df.groupby(
-        ["ItemCode", "TipoForecast", "OcrCode3"], as_index=False
-    )["DocCur"].first()
+    precio_un = df.groupby(["ItemCode", "TipoForecast", "OcrCode3"], as_index=False)[
+        "PrecioUN"
+    ].mean()
+    doc_cur = df.groupby(["ItemCode", "TipoForecast", "OcrCode3"], as_index=False)[
+        "DocCur"
+    ].first()
 
-    pivot = (
-        pivot.merge(precio_un, on=["ItemCode", "TipoForecast", "OcrCode3"])
-             .merge(doc_cur, on=["ItemCode", "TipoForecast", "OcrCode3"])
+    pivot = pivot.merge(precio_un, on=["ItemCode", "TipoForecast", "OcrCode3"]).merge(
+        doc_cur, on=["ItemCode", "TipoForecast", "OcrCode3"]
     )
 
     # Normaliza nombres 01-12
@@ -197,13 +199,12 @@ def obtener_forecast_editable(
     return pivot[orden]
 
 
-
 # B_FCS006: Consulta de stock disponible para lista de ítems
 # # ∂B_FCS006/∂B0
 def obtener_stock(itemcodes, db_path=DB_PATH):
     if not itemcodes:
         return pd.DataFrame()
-    placeholders = ','.join('?' * len(itemcodes))
+    placeholders = ",".join("?" * len(itemcodes))
     query = f"""
     SELECT ItemCode, ItemName, WhsCode, Stock_Total, Stock_Lote, Lote, FechaVenc
     FROM Stock
@@ -212,12 +213,13 @@ def obtener_stock(itemcodes, db_path=DB_PATH):
     """
     return run_query(query, db_path, tuple(itemcodes))
 
+
 # B_FCS007: Consulta de órdenes de venta por cliente e ítems, con filtro opcional de estado
 # # ∂B_FCS007/∂B0
 def obtener_ordenes_venta(cardcode, itemcodes, line_status=None, db_path=DB_PATH):
     if not itemcodes:
         return pd.DataFrame()
-    placeholders = ','.join('?' * len(itemcodes))
+    placeholders = ",".join("?" * len(itemcodes))
     query = f"""
     SELECT r.DocDate, r.ItemCode, i.ItemName, r.Dscription, r.Quantity,
            r.LineTotal, r.LineStatus, o.Comments
@@ -227,11 +229,12 @@ def obtener_ordenes_venta(cardcode, itemcodes, line_status=None, db_path=DB_PATH
     WHERE o.CardCode = ? AND r.ItemCode IN ({placeholders})
     """
     params = [cardcode] + itemcodes
-    if line_status in ('O', 'C'):
+    if line_status in ("O", "C"):
         query += " AND r.LineStatus = ?"
         params.append(line_status)
     query += " ORDER BY r.DocDate DESC"
     return run_query(query, db_path, tuple(params))
+
 
 # B_FCS008: Consulta de precios unitarios vigentes
 # # ∂B_FCS008/∂B0
@@ -242,8 +245,11 @@ def obtener_precios_unitarios(db_path=DB_PATH):
     WHERE PrecioUnitario IS NOT NULL
     """
     df = run_query(query, db_path)
-    df["PrecioUnitario"] = pd.to_numeric(df["PrecioUnitario"].astype(str).str.replace(",", "."), errors="coerce").fillna(0)
+    df["PrecioUnitario"] = pd.to_numeric(
+        df["PrecioUnitario"].astype(str).str.replace(",", "."), errors="coerce"
+    ).fillna(0)
     return df
+
 
 # B_FCS009: Consulta de forecast por mes (resumen ejecutivo)
 # # ∂B_FCS009/∂B0
@@ -258,6 +264,7 @@ def obtener_forecast_mes(db_path: str, anio: int, mes: int):
     """
     return _run_cf_select(query, (str(anio), f"{mes:02d}"))
 
+
 # B_FCS010: Consulta de ventas reales totales por mes
 # # ∂B_FCS010/∂B0
 def obtener_ventas_mes(db_path: str, anio: int, mes: int):
@@ -270,6 +277,7 @@ def obtener_ventas_mes(db_path: str, anio: int, mes: int):
         GROUP BY r.SlpCode, r.OcrCode3, o.CardCode, r.ItemCode
     """
     return _run_cf_select(query, (str(anio), f"{mes:02d}"))
+
 
 # B_FCS011: Consulta histórica de ventas por cliente e ítem
 # # ∂B_FCS011/∂B0
@@ -290,10 +298,15 @@ def obtener_historico_ventas(card_code: str, db_path: str = DB_PATH) -> pd.DataF
     if df.empty:
         return df
 
-    df['MesNombre'] = df['Mes'].apply(lambda x: f"{x:02d}")
-    df['Columna'] = df['Anio'].astype(str) + "-" + df['MesNombre']
+    df["MesNombre"] = df["Mes"].apply(lambda x: f"{x:02d}")
+    df["Columna"] = df["Anio"].astype(str) + "-" + df["MesNombre"]
 
-    pivot_df = df.pivot_table(index=["ItemCode", "ItemName"], columns="Columna", values="Cantidad", fill_value=0)
+    pivot_df = df.pivot_table(
+        index=["ItemCode", "ItemName"],
+        columns="Columna",
+        values="Cantidad",
+        fill_value=0,
+    )
     return pivot_df.sort_index(axis=1).reset_index()
 
 
@@ -301,8 +314,3 @@ def obtener_historico_ventas(card_code: str, db_path: str = DB_PATH) -> pd.DataF
 # # ∂B_FCS013/∂B0
 def obtener_nombre_vendedor(db_path: str):
     return _run_cf_select("SELECT SlpCode, SlpName FROM OSLP")
-
-
-
-
-

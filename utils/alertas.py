@@ -1,7 +1,10 @@
-# utils\alertas.py
-import sqlite3, json, time, hashlib
+﻿# utils\alertas.py
+import sqlite3
+import json
+import time
+import hashlib
 import pandas as pd
-import streamlit as st                                                     
+import streamlit as st
 from typing import Any, Tuple, List
 from datetime import datetime
 from contextlib import closing
@@ -21,45 +24,54 @@ def evaluar_alertas(df: pd.DataFrame) -> pd.DataFrame:
         - Alerta_Cantidad
     """
     df = df.copy()
-    df = df.loc[:, ~df.columns.duplicated()].copy()          # limpia cabeceras duplicadas
-    df = df.drop(columns=["Alerta_Fecha", "Alerta_Cantidad"], errors="ignore")  # borra alertas previas
-
+    df = df.loc[:, ~df.columns.duplicated()].copy()  # limpia cabeceras duplicadas
+    df = df.drop(
+        columns=["Alerta_Fecha", "Alerta_Cantidad"], errors="ignore"
+    )  # borra alertas previas
 
     # ---------- helpers -------------------------------------------------
-    _mes = lambda d: "" if pd.isnull(d) else pd.to_datetime(d, format="%Y-%m-%d", errors="coerce").strftime("%Y-%m")
+    def _mes(d):
+        if pd.isnull(d):
+            return ""
+        return pd.to_datetime(d, format="%Y-%m-%d", errors="coerce").strftime("%Y-%m")
 
     def _alerta_fecha(row, mes_fc):
         mes_ov = _mes(row["DocDueDate"])
-        if mes_fc == "":   return "Sin Forecast"
-        if mes_ov == "":   return "Sin OV"
-        if mes_fc == mes_ov:                 return "✓"
+        if mes_fc == "":
+            return "Sin Forecast"
+        if mes_ov == "":
+            return "Sin OV"
+        if mes_fc == mes_ov:
+            return "✓"
         return "⚠️ Adelantada" if mes_ov < mes_fc else "⚠️ Atrasada"
 
     def _cant_firme(row):
-        if pd.isna(row["OpenQty"]) or pd.isna(row["Cant_Forecast"]):  return "Sin datos"
-        return "✓" if float(row["OpenQty"]) == float(row["Cant_Forecast"]) else "⚠️ Difiere"
+        if pd.isna(row["OpenQty"]) or pd.isna(row["Cant_Forecast"]):
+            return "Sin datos"
+        return (
+            "✓" if float(row["OpenQty"]) == float(row["Cant_Forecast"]) else "⚠️ Difiere"
+        )
 
     def _cant_proy(row):
-        if pd.isna(row["OpenQty"]) or row["OpenQty"] == 0:            return "Sin OV"
+        if pd.isna(row["OpenQty"]) or row["OpenQty"] == 0:
+            return "Sin OV"
         return "⚠️ Mover a Firme"
 
     # ---------- segmentación -------------------------------------------
     df_firme = df[df["TipoForecast"].str.upper() == "FIRME"].copy()
-    df_proj  = (
-        df[(df["TipoForecast"].str.upper() == "PROYECTADO") &
-           (df["Cant_Forecast"] > 0)]
-        .copy()
-    )
+    df_proj = df[
+        (df["TipoForecast"].str.upper() == "PROYECTADO") & (df["Cant_Forecast"] > 0)
+    ].copy()
 
     # Crea columnas por defecto (garantiza existencia aunque el bloque esté vacío)
     for part in (df_firme, df_proj):
-        part["Alerta_Fecha"]    = ""
+        part["Alerta_Fecha"] = ""
         part["Alerta_Cantidad"] = ""
 
     # ---------- cálculo alertas Firme ----------------------------------
     if not df_firme.empty:
         mes_fc = df_firme["FechEntr_Forecast"].apply(_mes)
-        df_firme["Alerta_Fecha"]    = df_firme.apply(
+        df_firme["Alerta_Fecha"] = df_firme.apply(
             lambda r: _alerta_fecha(r, mes_fc.loc[r.name]), axis=1
         )
         df_firme["Alerta_Cantidad"] = df_firme.apply(_cant_firme, axis=1)
@@ -67,7 +79,7 @@ def evaluar_alertas(df: pd.DataFrame) -> pd.DataFrame:
     # ---------- cálculo alertas Proyectado -----------------------------
     if not df_proj.empty:
         mes_fc = df_proj["FechEntr_Forecast"].apply(_mes)
-        df_proj["Alerta_Fecha"]    = df_proj.apply(
+        df_proj["Alerta_Fecha"] = df_proj.apply(
             lambda r: _alerta_fecha(r, mes_fc.loc[r.name]), axis=1
         )
         df_proj["Alerta_Cantidad"] = df_proj.apply(_cant_proy, axis=1)
@@ -76,10 +88,12 @@ def evaluar_alertas(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([df_firme, df_proj], ignore_index=True)
 
 
-# B_FCS015: Inconsistencias Forecast vs OV            
+# B_FCS015: Inconsistencias Forecast vs OV
 # ∂B_FCS015/∂B0
 # FUNCION A REUTILIZAR
-def obtener_inconsistencias_forecast(slpcode: int, cardcode: str | None = None, db_path: str = DB_PATH) -> pd.DataFrame:
+def obtener_inconsistencias_forecast(
+    slpcode: int, cardcode: str | None = None, db_path: str = DB_PATH
+) -> pd.DataFrame:
     """
     Devuelve las líneas de Forecast_Detalle que presentan
     inconsistencias con Órdenes de Venta (ORDR/RDR1) a partir
@@ -139,7 +153,6 @@ def obtener_inconsistencias_forecast(slpcode: int, cardcode: str | None = None, 
     return run_query(sql, db_path, params)
 
 
-
 def df_alerta_is_valid(df: pd.DataFrame) -> bool:
     """
     Valida el DataFrame que llega desde el editor.
@@ -150,23 +163,26 @@ def df_alerta_is_valid(df: pd.DataFrame) -> bool:
       • FechEntr    fecha parseable
       • SlpCode     presente y consistente (opcional según tu flujo)
     """
-    return all([
-        df["ForecastID"].notna().all()  and (df["ForecastID"] > 0).all(),
-        df["ItemCode"].astype(str).str.len().gt(0).all(),
-        pd.to_numeric(df["Cant_Forecast"], errors="coerce").ge(0).all(),
-        pd.to_datetime(df["FechEntr"], format="%Y-%m-%d", errors="coerce"),
-        # Descomenta si quisieras validar SlpCode también
-        # df["SlpCode"].notna().all() and (df["SlpCode"] > 0).all(),
-    ])
+    return all(
+        [
+            df["ForecastID"].notna().all() and (df["ForecastID"] > 0).all(),
+            df["ItemCode"].astype(str).str.len().gt(0).all(),
+            pd.to_numeric(df["Cant_Forecast"], errors="coerce").ge(0).all(),
+            pd.to_datetime(df["FechEntr"], format="%Y-%m-%d", errors="coerce"),
+            # Descomenta si quisieras validar SlpCode también
+            # df["SlpCode"].notna().all() and (df["SlpCode"] > 0).all(),
+        ]
+    )
 
 
-MAX_RETRY = 5                         # reintentos ante DBLocked
+MAX_RETRY = 5  # reintentos ante DBLocked
+
 
 # B_ALR002: Aplicación de cambios sobre Forecast_Detalle   ∂B_ALR002/∂B0
-# FUNCIÓN A REUTILZIAR 
+# FUNCIÓN A REUTILZIAR
 def _aplicar_cambios_alertas(
-        df_original: pd.DataFrame,
-        df_editado: pd.DataFrame) -> None:
+    df_original: pd.DataFrame, df_editado: pd.DataFrame
+) -> None:
     """
     Detecta diferencias entre DF original y editado, persiste los cambios
     (cantidad y/o fecha) en Forecast_Detalle con:
@@ -191,24 +207,28 @@ def _aplicar_cambios_alertas(
         new = df_editado.loc[idx]
 
         if (
-            old["Cant_Forecast"] != new["Cant_Forecast"] or
-            old["FechEntr"]      != new["FechEntr"]
+            old["Cant_Forecast"] != new["Cant_Forecast"]
+            or old["FechEntr"] != new["FechEntr"]
         ):
-            cambios.append((
-                new["Cant_Forecast"],          # SET Cant
-                new["FechEntr"],               # SET FechEntr
-                int(old["ForecastID"]),        # PK ForecastID
-                old["ItemCode"]                # PK ItemCode
-            ))
-            diff_log.append({
-                "ForecastID": int(old["ForecastID"]),
-                "ItemCode":   old["ItemCode"],
-                "SlpCode":    int(old["SlpCode"]),
-                "Cant_old":   old["Cant_Forecast"],
-                "Cant_new":   new["Cant_Forecast"],
-                "Fecha_old":  old["FechEntr"],
-                "Fecha_new":  new["FechEntr"],
-            })
+            cambios.append(
+                (
+                    new["Cant_Forecast"],  # SET Cant
+                    new["FechEntr"],  # SET FechEntr
+                    int(old["ForecastID"]),  # PK ForecastID
+                    old["ItemCode"],  # PK ItemCode
+                )
+            )
+            diff_log.append(
+                {
+                    "ForecastID": int(old["ForecastID"]),
+                    "ItemCode": old["ItemCode"],
+                    "SlpCode": int(old["SlpCode"]),
+                    "Cant_old": old["Cant_Forecast"],
+                    "Cant_new": new["Cant_Forecast"],
+                    "Fecha_old": old["FechEntr"],
+                    "Fecha_new": new["FechEntr"],
+                }
+            )
 
     if not cambios:
         st.info("ℹ️ No se detectaron modificaciones.")
@@ -223,45 +243,51 @@ def _aplicar_cambios_alertas(
             with closing(sqlite3.connect(DB_PATH, timeout=5.0)) as conn, conn:
                 conn.execute("BEGIN IMMEDIATE;")
 
-                conn.executemany("""
+                conn.executemany(
+                    """
                     INSERT INTO Forecast_Detalle
                            (Cant, FechEntr, ForecastID, ItemCode)
                     VALUES (?, ?, ?, ?)
                     ON CONFLICT(ForecastID, ItemCode)
                     DO UPDATE SET Cant     = excluded.Cant,
                                   FechEntr = excluded.FechEntr;
-                """, cambios)
+                """,
+                    cambios,
+                )
 
                 # ── 3 · C2_TRACE — regla R4 ──────────────────────────
                 payload = {
-                    "usuario":  user_email,
-                    "diff":     diff_log,
+                    "usuario": user_email,
+                    "diff": diff_log,
                 }
                 payload_hash = hashlib.sha256(
                     json.dumps(payload, default=str).encode()
                 ).hexdigest()
 
-                conn.execute("""
+                conn.execute(
+                    """
                     INSERT INTO C2_TRACE
                           (timestamp, usuario, slpcode, accion,
                            bloque, severity, payload_hash, detalle)
                     VALUES (?,?,?,?,?,?,?,?)
-                """, (
-                    datetime.now().isoformat(timespec="seconds"),
-                    user_email,
-                    int(diff_log[0]["SlpCode"]),
-                    "alert_fix",
-                    "A1_ALERTAS_FORECAST_DSL",
-                    "info",
-                    payload_hash,
-                    json.dumps(payload, default=str),
-                ))
+                """,
+                    (
+                        datetime.now().isoformat(timespec="seconds"),
+                        user_email,
+                        int(diff_log[0]["SlpCode"]),
+                        "alert_fix",
+                        "A1_ALERTAS_FORECAST_DSL",
+                        "info",
+                        payload_hash,
+                        json.dumps(payload, default=str),
+                    ),
+                )
             ok = True
 
         except sqlite3.OperationalError as e:
             if "database is locked" in str(e).lower():
                 intento += 1
-                time.sleep(0.6 * intento)        # back-off exponencial
+                time.sleep(0.6 * intento)  # back-off exponencial
             else:
                 raise
 
@@ -273,18 +299,17 @@ def _aplicar_cambios_alertas(
     st.success(f"✅ {len(cambios)} cambios aplicados.")
 
     # refresca sólo una vez por ForecastID editado
-    ids_para_refrescar = {c[2] for c in cambios}   # 3.er campo = ForecastID
+    ids_para_refrescar = {c[2] for c in cambios}  # 3.er campo = ForecastID
     for fc_id in ids_para_refrescar:
         _refrescar_buffer_ui(
             forecast_id=fc_id,
-            key_buffer="buffer_alertas",   # ← pon aquí tu clave real
+            key_buffer="buffer_alertas",  # ← pon aquí tu clave real
             db_path=DB_PATH,
         )
 
     st.experimental_rerun()
 
-    
-    
+
 def editor_cambios_forecast(df: pd.DataFrame, *, key: str = "ed_alertas") -> None:
     """
     Permite editar Cantidad y Fecha del Forecast directamente desde una tabla.
@@ -293,7 +318,9 @@ def editor_cambios_forecast(df: pd.DataFrame, *, key: str = "ed_alertas") -> Non
 
     # ---------- verificación de columna ----------
     if "FechEntr" not in df.columns:
-        st.error("⚠️ No se encontró la columna 'FechEntr' después de normalizar. Revisa los logs.")
+        st.error(
+            "⚠️ No se encontró la columna 'FechEntr' después de normalizar. Revisa los logs."
+        )
         print("❌ [DEBUG-EDITOR] columnas recibidas:", df.columns.tolist())
         return
 
@@ -303,25 +330,25 @@ def editor_cambios_forecast(df: pd.DataFrame, *, key: str = "ed_alertas") -> Non
     df["FechEntr"] = (
         df["FechEntr"]
         .astype(str)
-        .str.slice(0, 10)                 # garantiza largo máximo 'YYYY-MM-DD'
+        .str.slice(0, 10)  # garantiza largo máximo 'YYYY-MM-DD'
         .apply(lambda x: x if len(x) == 10 else f"{x}-01")
     )
     df["FechEntr"] = pd.to_datetime(df["FechEntr"], format="%Y-%m-%d", errors="coerce")
 
     # LOG antes de mostrar editor
-    print("🔍 [DEBUG-EDITOR] dtypes convertidos:\n", df.dtypes[["Cant_Forecast", "FechEntr"]])
+    print(
+        "🔍 [DEBUG-EDITOR] dtypes convertidos:\n",
+        df.dtypes[["Cant_Forecast", "FechEntr"]],
+    )
     print(df[["Cant_Forecast", "FechEntr"]].head(5).to_string(index=False))
 
     column_config = {
         "Cant_Forecast": st.column_config.NumberColumn(
-            label="Cantidad comprometida",
-            min_value=0.0,
-            step=1.0
+            label="Cantidad comprometida", min_value=0.0, step=1.0
         ),
         "FechEntr": st.column_config.DateColumn(
-            label="Fecha de Entrega",
-            format="YYYY-MM-DD"
-        )
+            label="Fecha de Entrega", format="YYYY-MM-DD"
+        ),
     }
 
     df_edit = st.data_editor(
@@ -329,16 +356,13 @@ def editor_cambios_forecast(df: pd.DataFrame, *, key: str = "ed_alertas") -> Non
         key=key,
         column_config=column_config,
         use_container_width=True,
-        num_rows="fixed"
+        num_rows="fixed",
     )
 
     if st.button("💾 Guardar correcciones", type="primary"):
         _aplicar_cambios_alertas(df, df_edit)
         st.success("✅ Cambios aplicados. Refresca para volver a analizar.")
 
-
-
-             
 
 def obtener_meses_disponibles_OV(db_path=DB_PATH):
     # Devuelve lista de meses 'YYYY-MM' desde el mes actual en adelante con OV abiertas y fecha de vencimiento
@@ -418,11 +442,12 @@ def obtener_meses_disponibles_Forecast(
     Devuelve lista única de meses (YYYY-MM) futuros desde el forecast (no OV).
     """
     from datetime import datetime
+
     mes_actual = datetime.now().strftime("%Y-%m")
 
     tipo_sql = {
-        "Firme":       "AND UPPER(TipoForecast) = 'FIRME'",
-        "Proyectado":  "AND UPPER(TipoForecast) = 'PROYECTADO'",
+        "Firme": "AND UPPER(TipoForecast) = 'FIRME'",
+        "Proyectado": "AND UPPER(TipoForecast) = 'PROYECTADO'",
     }.get(tipo_forecast, "AND UPPER(TipoForecast) IN ('FIRME','PROYECTADO')")
 
     sql = f"""
@@ -452,8 +477,8 @@ def consultar_forecast_sin_ov(
     placeholders = ",".join("?" * len(meses_yyyy_mm))
 
     tipo_sql = {
-        "Firme":       "AND UPPER(fd.TipoForecast) = 'FIRME'",
-        "Proyectado":  "AND UPPER(fd.TipoForecast) = 'PROYECTADO'",
+        "Firme": "AND UPPER(fd.TipoForecast) = 'FIRME'",
+        "Proyectado": "AND UPPER(fd.TipoForecast) = 'PROYECTADO'",
     }.get(tipo_forecast, "AND UPPER(fd.TipoForecast) IN ('FIRME','PROYECTADO')")
 
     sql = f"""
@@ -491,7 +516,7 @@ def consultar_forecast_sin_ov(
 
     # ── Mantén mes numérico “07…12” para el pivot ──
     if not df.empty:
-        df["Mes"] = df["MesYM"].str[-2:]    # '2025-07' ➜ '07'
+        df["Mes"] = df["MesYM"].str[-2:]  # '2025-07' ➜ '07'
     return df
 
 
@@ -552,9 +577,18 @@ def vista_alertas_cliente(slpcode: int) -> None:
 
     # ---------- tabla principal ----------
     columnas_originales = [
-        "DocDueDate", "DocEntry", "ItemCode", "Dscription",
-        "OpenQty", "Price", "Currency", "CardCode", "TipoForecast",
-        "Cant_Forecast", "Alerta_Fecha", "Alerta_Cantidad"
+        "DocDueDate",
+        "DocEntry",
+        "ItemCode",
+        "Dscription",
+        "OpenQty",
+        "Price",
+        "Currency",
+        "CardCode",
+        "TipoForecast",
+        "Cant_Forecast",
+        "Alerta_Fecha",
+        "Alerta_Cantidad",
     ]
 
     columnas_renombradas = {
@@ -569,19 +603,19 @@ def vista_alertas_cliente(slpcode: int) -> None:
         "TipoForecast": "Forecast",
         "Cant_Forecast": "Cant_Forecast",
         "Alerta_Fecha": "Alerta_Fecha",
-        "Alerta_Cantidad": "Alerta_Cantidad"
+        "Alerta_Cantidad": "Alerta_Cantidad",
     }
 
     df_vista = df[columnas_originales].rename(columns=columnas_renombradas)
 
-    st.caption("Solo se visualizan líneas de OV abiertas. La comparación se realiza contra la fecha comprometida (FechEntr) y la cantidad de forecast.")
+    st.caption(
+        "Solo se visualizan líneas de OV abiertas. La comparación se realiza contra la fecha comprometida (FechEntr) y la cantidad de forecast."
+    )
     st.dataframe(df_vista, use_container_width=True)
 
     # ---------- editor inline ----------
     if st.checkbox("✏️ Editar alertas inline"):
         editor_cambios_forecast(df, key="ed_alertas_cliente")
-
-
 
 
 def vista_forecast_sin_ov():
@@ -599,7 +633,9 @@ def vista_forecast_sin_ov():
     meses_sel = st.multiselect(
         "Meses a analizar (FechEntr):",
         options=meses_disponibles,
-        default=[mes_actual] if mes_actual in meses_disponibles else [meses_disponibles[0]]
+        default=(
+            [mes_actual] if mes_actual in meses_disponibles else [meses_disponibles[0]]
+        ),
     )
     if not meses_sel:
         st.info("Selecciona al menos un mes.")
@@ -612,16 +648,13 @@ def vista_forecast_sin_ov():
 
     # Columnas según meses seleccionados y presentes en forecast
     meses_col = sorted(set(meses_sel) | set(df_sin_ov["MesYM"].unique()))
-    df_pivot = (
-        df_sin_ov.pivot_table(
-            index=["CardCode", "ItemCode", "OcrCode3", "TipoForecast"],
-            columns="MesYM",
-            values="Cant",
-            aggfunc="sum",
-            fill_value=0
-        )
-        .reset_index()
-    )
+    df_pivot = df_sin_ov.pivot_table(
+        index=["CardCode", "ItemCode", "OcrCode3", "TipoForecast"],
+        columns="MesYM",
+        values="Cant",
+        aggfunc="sum",
+        fill_value=0,
+    ).reset_index()
     for col in meses_col:
         if col not in df_pivot.columns:
             df_pivot[col] = 0
@@ -630,21 +663,25 @@ def vista_forecast_sin_ov():
 
     st.dataframe(df_pivot, use_container_width=True)
 
- 
-    
+
 def render_alertas_forecast(slpcode: int):
     """
     Vista principal de Alertas Forecast, organizada por sub-tabs:
     1. Diagnóstico Forecast vs Realidad
     2. Forecast sin OV
     """
-    tabs = st.tabs([
-        "🔍 Dif: OV/Forecast",
-        "📄 Forecast sin OV"
-    ])
+    tabs = st.tabs(["🔍 Dif: OV/Forecast", "📄 Forecast sin OV"])
 
     with tabs[0]:
-        vista_alertas_cliente(slpcode)  # Esta función ya incluye resumen macro + desglose
+        vista_alertas_cliente(
+            slpcode
+        )  # Esta función ya incluye resumen macro + desglose
 
     with tabs[1]:
         vista_forecast_sin_ov()
+
+
+def _mes(d):
+    if pd.isnull(d):
+        return ""
+    return pd.to_datetime(d, format="%Y-%m-%d", errors="coerce").strftime("%Y-%m")

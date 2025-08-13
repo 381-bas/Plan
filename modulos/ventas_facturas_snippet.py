@@ -1,4 +1,4 @@
-# modulos/ventas_facturas_snippet.py
+﻿# modulos/ventas_facturas_snippet.py
 
 from __future__ import annotations
 from typing import Any, List, Tuple
@@ -12,6 +12,7 @@ from utils.db import run_query, DB_PATH
 # ───────────────────────────────────────────────────────────────────────────
 # 👓  Punto de entrada UI
 # ───────────────────────────────────────────────────────────────────────────
+
 
 def mostrar_facturas() -> None:
     """Render principal de la pestaña *Facturas* (OINV × INV1)."""
@@ -39,6 +40,7 @@ def mostrar_facturas() -> None:
 # 📑  Vista SQL Base – OINV × INV1 (+OCRD)
 # ───────────────────────────────────────────────────────────────────────────
 
+
 # B_VF001
 def _parse_docdate(col: pd.Series) -> pd.Series:
     """Normaliza DocDate priorizando 'YYYY-MM-DD' y con fallback day-first."""
@@ -48,7 +50,6 @@ def _parse_docdate(col: pd.Series) -> pd.Series:
         # Intenta interpretar entradas atípicas (p.ej., 'YYYY-DD-MM' o variantes)
         s.loc[mask] = pd.to_datetime(col[mask], dayfirst=True, errors="coerce")
     return s.dt.date  # devuelve date (sin hora)
-
 
 
 def obtener_facturas_base(
@@ -62,7 +63,9 @@ def obtener_facturas_base(
     filtros_sql = filtros_sql or []
     params = params or []
 
-    filtros_sql.insert(0, "o.CardCode IN (SELECT DISTINCT CardCode FROM Forecast_Detalle)")
+    filtros_sql.insert(
+        0, "o.CardCode IN (SELECT DISTINCT CardCode FROM Forecast_Detalle)"
+    )
     where_clause = "WHERE " + " AND ".join(filtros_sql)
 
     query = f"""
@@ -96,7 +99,9 @@ def obtener_facturas_base(
     df["DocEntry"] = df["DocEntry"].astype(str)
     df["DocNum"] = df["DocNum"].astype(str)
     df["DocDate"] = _parse_docdate(df["DocDate"])
-    df["MesFactura"] = pd.to_datetime(df["DocDate"], format="%Y-%m-%d", errors="coerce").dt.strftime("%Y-%m")
+    df["MesFactura"] = pd.to_datetime(
+        df["DocDate"], format="%Y-%m-%d", errors="coerce"
+    ).dt.strftime("%Y-%m")
 
     return df
 
@@ -106,6 +111,7 @@ def obtener_facturas_base(
 # ───────────────────────────────────────────────────────────────────────────
 
 # B_VF002
+
 
 def aplicar_filtros(df: pd.DataFrame) -> pd.DataFrame:
     st.subheader("Filtros")
@@ -133,7 +139,9 @@ def aplicar_filtros(df: pd.DataFrame) -> pd.DataFrame:
     if cliente_sel:
         df_cli = df[df["CardName"].isin(cliente_sel)]
         if df_cli.empty:
-            st.warning("Para el/los cliente(s) seleccionado(s) no existen ventas en los meses filtrados.")
+            st.warning(
+                "Para el/los cliente(s) seleccionado(s) no existen ventas en los meses filtrados."
+            )
         df = df_cli
 
     return df
@@ -145,6 +153,7 @@ def aplicar_filtros(df: pd.DataFrame) -> pd.DataFrame:
 
 # B_VF003
 
+
 def calcular_kpis(df: pd.DataFrame) -> None:
     st.markdown("### KPIs")
     col1, col2, col3 = st.columns(3)
@@ -155,11 +164,13 @@ def calcular_kpis(df: pd.DataFrame) -> None:
 
 # B_VF004
 
+
 def diagnostico_semantico(df: pd.DataFrame) -> None:
     pass  # Comentado temporalmente por decisión operativa
 
 
 # B_VF005
+
 
 def renderizar_vista(df: pd.DataFrame) -> None:
     st.subheader("Vista Detallada de Facturas")

@@ -1,4 +1,4 @@
-# services/snapshot_schema.py
+﻿# services/snapshot_schema.py
 # B_SNAP001: Creación de tablas Snapshot_Forecast y Snapshot_Detalle
 import pandas as pd
 from datetime import date
@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS Snapshot_Detalle (
 );
 """
 
+
 # B_SNAP002: Actualización de Snapshot_Detalle con datos reales desde OINV/INV1
 def actualizar_snapshot_realidad(db_path: str = DB_PATH) -> None:
     print("🔍 Actualizando Cant_Real / Delta… (masivo)")
@@ -67,38 +68,45 @@ def actualizar_snapshot_realidad(db_path: str = DB_PATH) -> None:
         raise
 
 
-
-
-
 def obtener_cardcode(snapshot_id: int, db_path: str = DB_PATH) -> str | None:
     df = run_query(
         "SELECT CardCode FROM Snapshot_Forecast WHERE SnapshotID = ?",
         params=(snapshot_id,),
-        db_path=db_path
+        db_path=db_path,
     )
     return df.iloc[0]["CardCode"] if not df.empty else None
+
 
 def obtener_forecastid_cliente(cardcode: str, db_path: str = DB_PATH) -> int | None:
     df = run_query(
         "SELECT MAX(ForecastID) AS ForecastID FROM Forecast_Detalle WHERE CardCode = ?",
         params=(cardcode,),
-        db_path=db_path
+        db_path=db_path,
     )
     if not df.empty and not pd.isna(df.iloc[0]["ForecastID"]):
         return int(df.iloc[0]["ForecastID"])
     return None
 
+
 # B_SNAP004: Exportar log ForecastCero
 
-def exportar_forecast_cero_log(db_path: str = DB_PATH, csv_path: str = "forecast_cero_log.csv") -> None:
-    df = run_query("SELECT * FROM Snapshot_Detalle WHERE Observacion = 'ForecastCero'", db_path=db_path)
+
+def exportar_forecast_cero_log(
+    db_path: str = DB_PATH, csv_path: str = "forecast_cero_log.csv"
+) -> None:
+    df = run_query(
+        "SELECT * FROM Snapshot_Detalle WHERE Observacion = 'ForecastCero'",
+        db_path=db_path,
+    )
     if df.empty:
         print("📭 No hay registros ForecastCero para exportar.")
     else:
         df.to_csv(csv_path, index=False)
         print(f"📤 Log ForecastCero exportado a {csv_path}")
 
+
 # B_SNAP003: Ejecución de Snapshot desde Forecast vigente
+
 
 def ejecutar_snapshot_forecast(db_path: str = DB_PATH) -> None:
     # (sin BEGIN / COMMIT explícitos)
@@ -111,11 +119,13 @@ def ejecutar_snapshot_forecast(db_path: str = DB_PATH) -> None:
             print("🟡 No hay combinaciones activas en Forecast_Detalle.")
             return
 
-        print(f"📸 Iniciando generación de snapshot para {len(df_combos)} combinaciones…")
+        print(
+            f"📸 Iniciando generación de snapshot para {len(df_combos)} combinaciones…"
+        )
         inserts_detalle: list[list] = []
 
         for _, row in df_combos.iterrows():
-            slpcode  = int(row["SlpCode"])
+            slpcode = int(row["SlpCode"])
             cardcode = row["CardCode"]
 
             df_id = run_query(
@@ -144,7 +154,9 @@ def ejecutar_snapshot_forecast(db_path: str = DB_PATH) -> None:
                 db_path=db_path,
             )
             if df_forecast.empty:
-                print(f"🔕 Sin detalle forecast para {cardcode} con ForecastID={forecast_id}")
+                print(
+                    f"🔕 Sin detalle forecast para {cardcode} con ForecastID={forecast_id}"
+                )
                 continue
 
             fecha_snapshot = date.today().isoformat()
@@ -154,7 +166,9 @@ def ejecutar_snapshot_forecast(db_path: str = DB_PATH) -> None:
                 print(f"🟡 Ya existe snapshot este mes para {cardcode}. Se omite.")
                 continue
 
-            print(f"🧾 SlpCode={slpcode} | CardCode={cardcode} | ForecastID={forecast_id}")
+            print(
+                f"🧾 SlpCode={slpcode} | CardCode={cardcode} | ForecastID={forecast_id}"
+            )
 
             _execute_write(
                 """
@@ -175,21 +189,32 @@ def ejecutar_snapshot_forecast(db_path: str = DB_PATH) -> None:
             ).iloc[0]["id"]
 
             df_forecast["SnapshotID"] = int(snapshot_id)
-            df_forecast["Cant_Real"]  = 0
-            df_forecast["Delta"]      = 0
+            df_forecast["Cant_Real"] = 0
+            df_forecast["Delta"] = 0
             df_forecast["Delta_Porc"] = 0
 
             cols = [
-                "SnapshotID", "ItemCode", "TipoForecast", "OcrCode3", "FechEntr",
-                "Linea", "Cant_Esperada", "PrecioUN", "DocCur",
-                "Cant_Real", "Delta", "Delta_Porc",
+                "SnapshotID",
+                "ItemCode",
+                "TipoForecast",
+                "OcrCode3",
+                "FechEntr",
+                "Linea",
+                "Cant_Esperada",
+                "PrecioUN",
+                "DocCur",
+                "Cant_Real",
+                "Delta",
+                "Delta_Porc",
             ]
             inserts_detalle.extend(df_forecast[cols].values.tolist())
 
         inserts_detalle = filtrar_nuevos_detalles(inserts_detalle, db_path)
 
         if inserts_detalle:
-            print(f"🧩 Insertando {len(inserts_detalle)} registros en Snapshot_Detalle…")
+            print(
+                f"🧩 Insertando {len(inserts_detalle)} registros en Snapshot_Detalle…"
+            )
             _execute_write(
                 """
                 INSERT INTO Snapshot_Detalle (
@@ -213,10 +238,9 @@ def ejecutar_snapshot_forecast(db_path: str = DB_PATH) -> None:
         raise
 
 
-
-
-def forecast_cero_existente(cardcode: str, itemcode: str, fechentr: str,
-                            db_path: str = DB_PATH) -> bool:
+def forecast_cero_existente(
+    cardcode: str, itemcode: str, fechentr: str, db_path: str = DB_PATH
+) -> bool:
     """
     Verifica si ya existe una línea ForecastCero para ese cliente/ítem/mes de la venta.
     Usa s.FechEntr como base, no f.Fecha_Snapshot (más preciso).
@@ -231,9 +255,9 @@ def forecast_cero_existente(cardcode: str, itemcode: str, fechentr: str,
           AND s.Observacion = 'ForecastCero'
         LIMIT 1
     """
-    return not run_query(query, params=(cardcode, itemcode, fechentr), db_path=db_path).empty
-
-
+    return not run_query(
+        query, params=(cardcode, itemcode, fechentr), db_path=db_path
+    ).empty
 
 
 def build_clave_set(snapshot_ids: list[int], db_path: str = DB_PATH) -> set[tuple]:
@@ -266,14 +290,15 @@ def build_clave_set(snapshot_ids: list[int], db_path: str = DB_PATH) -> set[tupl
             for sid, itm, fech in df.itertuples(index=False, name=None)
         }
 
-
     return claves
-
 
 
 FECH_IDX = 4  # posición de FechEntr dentro de cada tupla de inserción
 
-def filtrar_nuevos_detalles(candidatos: list[tuple], db_path: str = DB_PATH) -> list[tuple]:
+
+def filtrar_nuevos_detalles(
+    candidatos: list[tuple], db_path: str = DB_PATH
+) -> list[tuple]:
     """
     Filtra 'candidatos' dejando sólo los que NO existen ya en Snapshot_Detalle.
     Mucho más rápido: hace 1 SELECT masivo en lugar de 1 por fila.
@@ -289,12 +314,12 @@ def filtrar_nuevos_detalles(candidatos: list[tuple], db_path: str = DB_PATH) -> 
 
     # 2️⃣ filtrar en memoria
     nuevos = [
-        t for t in candidatos
-        if (t[0], t[1], t[FECH_IDX]) not in claves_existentes   # SnapshotID, ItemCode, FechEntr
+        t
+        for t in candidatos
+        if (t[0], t[1], t[FECH_IDX])
+        not in claves_existentes  # SnapshotID, ItemCode, FechEntr
     ]
     return nuevos
-
-
 
 
 def obtener_o_insertar_snapshot(
@@ -304,11 +329,11 @@ def obtener_o_insertar_snapshot(
     observacion: str,
     fechentr: str | None = None,
     db_path: str = DB_PATH,
-    _depth: int = 0,          # ← nuevo parámetro de control
+    _depth: int = 0,  # ← nuevo parámetro de control
 ) -> int:
     """
     Devuelve el SnapshotID existente para el cliente en el mes lógico
-    (mes de la venta si se pasa `fechentr`, o el mes actual).  
+    (mes de la venta si se pasa `fechentr`, o el mes actual).
     Si no existe, lo crea – con protección anti-recursión.
     """
     if _depth > 1:
@@ -316,7 +341,7 @@ def obtener_o_insertar_snapshot(
             f"Loop al insertar Snapshot_Forecast para {cardcode} {fechentr or 'hoy'}"
         )
 
-    fecha_base = (fechentr or date.today().isoformat())[:7]   # 'YYYY-MM'
+    fecha_base = (fechentr or date.today().isoformat())[:7]  # 'YYYY-MM'
 
     df = run_query(
         """
@@ -394,7 +419,7 @@ def incluir_forecast_cero(db_path: str = DB_PATH) -> None:
     inserts_detalle: list[list] = []
 
     for _, row in df_faltantes.iterrows():
-        slpcode  = int(row["SlpCode"])
+        slpcode = int(row["SlpCode"])
         cardcode = row["CardCode"]
         itemcode = row["ItemCode"]
 
@@ -412,21 +437,23 @@ def incluir_forecast_cero(db_path: str = DB_PATH) -> None:
             db_path=db_path,
         )
 
-        inserts_detalle.append((
-            snapshot_id,
-            itemcode,
-            "Real",
-            row["OcrCode3"],
-            row["FechEntr"],
-            str(row["Linea"]),
-            0,                      # Cant_Esperada
-            row["PrecioUN"],
-            row["DocCur"],
-            row["CantReal"],
-            row["CantReal"],        # Delta
-            0,                      # Delta_Porc
-            "ForecastCero",
-        ))
+        inserts_detalle.append(
+            (
+                snapshot_id,
+                itemcode,
+                "Real",
+                row["OcrCode3"],
+                row["FechEntr"],
+                str(row["Linea"]),
+                0,  # Cant_Esperada
+                row["PrecioUN"],
+                row["DocCur"],
+                row["CantReal"],
+                row["CantReal"],  # Delta
+                0,  # Delta_Porc
+                "ForecastCero",
+            )
+        )
 
     inserts_detalle = filtrar_nuevos_detalles(inserts_detalle, db_path)
 
@@ -449,8 +476,6 @@ def incluir_forecast_cero(db_path: str = DB_PATH) -> None:
     print(f"✅ Insertadas {len(inserts_detalle)} líneas ForecastCero nuevas.")
 
 
-
-
 def verificar_forecast_cero(db_path: str = DB_PATH) -> None:
     query = """
         SELECT COUNT(*) AS TotalForecastCero
@@ -465,7 +490,7 @@ def verificar_forecast_cero(db_path: str = DB_PATH) -> None:
 def exportar_clientes_sin_forecast(
     db_path: str = DB_PATH,
     export_csv: bool = True,
-    csv_path: str = "clientes_sin_forecast.csv"
+    csv_path: str = "clientes_sin_forecast.csv",
 ) -> pd.DataFrame:
     """
     Detecta clientes con ventas en OINV pero sin forecast asignado en Forecast_Detalle.
@@ -532,12 +557,6 @@ def snapshot_existente(cardcode: str, fecha: str, db_path: str = DB_PATH) -> boo
     """
     df = run_query(query, params=(cardcode, fecha), db_path=db_path)
     return not df.empty
-
-
-
-
-
-
 
 
 if __name__ == "__main__":
