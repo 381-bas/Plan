@@ -1,10 +1,6 @@
 ﻿# B_DOC001: Comentarios menores (solo documentación, sin cambiar lógica)
 # ∂B_DOC001/∂B0
 # Mantiene exportación única a 8. Plan_unificado.txt y rutas fijas.
-# ggg
-# ggg
-# “no-op”
-
 import os
 import re
 import sys
