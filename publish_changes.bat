@@ -1,16 +1,16 @@
 @echo off
 setlocal
 
-rem Rama actual
+rem === Rama actual ===
 for /f "delims=" %%b in ('git rev-parse --abbrev-ref HEAD') do set CUR=%%b
 
-rem Bloquea si estás en main
+rem === Bloquea si estas en main ===
 if "%CUR%"=="main" (
   echo [ERROR] Estas en main. Usa: start_work.bat chore\mi-rama
   exit /b 1
 )
 
-rem Captura mensaje completo (con espacios y parentesis)
+rem === Captura mensaje completo (soporta espacios y parentesis) ===
 set "MSG=%*"
 if "%MSG%"=="" (
   echo Uso: publish_changes.bat "tipo(scope): mensaje"
@@ -34,11 +34,17 @@ git status
 echo [add] Agregando cambios...
 git add -A || exit /b 1
 
-rem Escribe el mensaje en un archivo temporal para evitar problemas con parentesis
+rem === Mensaje a archivo via PowerShell (evita parseo de CMD) ===
 set "TMPMSG=%TEMP%\commit_msg_%RANDOM%.txt"
-> "%TMPMSG%" echo %MSG%
+powershell -NoProfile -Command ^
+  "$m = $env:MSG; Set-Content -LiteralPath $env:TEMP+'\commit_msg.txt' -Value $m -Encoding UTF8"
+if errorlevel 1 (
+  echo [ERROR] No pude escribir el mensaje. Aborta.
+  exit /b 1
+)
+set "TMPMSG=%TEMP%\commit_msg.txt"
 
-echo [commit] Creando commit desde archivo: %TMPMSG%
+echo [commit] Creando commit con -F "%TMPMSG%" ...
 git commit -F "%TMPMSG%"
 if errorlevel 1 (
   echo [INFO] Nada que commitear. ¿Guardaste los cambios?
