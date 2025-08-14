@@ -3,6 +3,7 @@
 # Mantiene exportación única a 8. Plan_unificado.txt y rutas fijas.
 # ggg
 # ggg
+# “no-op”
 
 import os
 import re
