@@ -1,5 +1,9 @@
-﻿# B_EXP001: Importaciones y configuración global de exportación SCANNER
-# # ∂B_EXP001/∂B0
+﻿# B_DOC001: Comentarios menores (solo documentación, sin cambiar lógica)
+# ∂B_DOC001/∂B0
+# Mantiene exportación única a 8. Plan_unificado.txt y rutas fijas.
+# ggg
+# ggg
+
 import os
 import re
 import sys

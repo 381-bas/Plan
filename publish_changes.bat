@@ -10,7 +10,7 @@ if "%CUR%"=="main" (
   exit /b 1
 )
 
-rem Captura el mensaje completo (con espacios y parentesis) de forma segura
+rem Captura mensaje completo (con espacios y parentesis)
 set "MSG=%*"
 if "%MSG%"=="" (
   echo Uso: publish_changes.bat "tipo(scope): mensaje"
@@ -34,15 +34,26 @@ git status
 echo [add] Agregando cambios...
 git add -A || exit /b 1
 
-echo [commit] Creando commit...
-git commit -m "%MSG%"
+rem Escribe el mensaje en un archivo temporal para evitar problemas con parentesis
+set "TMPMSG=%TEMP%\commit_msg_%RANDOM%.txt"
+> "%TMPMSG%" echo %MSG%
+
+echo [commit] Creando commit desde archivo: %TMPMSG%
+git commit -F "%TMPMSG%"
 if errorlevel 1 (
   echo [INFO] Nada que commitear. ¿Guardaste los cambios?
+  del "%TMPMSG%" >nul 2>&1
   exit /b 1
 )
+
+del "%TMPMSG%" >nul 2>&1
 
 echo [push] Subiendo rama %CUR%...
 git push -u origin %CUR% || exit /b 1
 
-echo [OK] Abre tu PR: https://github.com/381-bas/Plan/pull/new/%CUR%
+echo [OK] Abriendo PR en tu navegador...
+start "" "https://github.com/381-bas/Plan/compare/main...%CUR%"
+echo [OK] Si no se abre, usa esta URL:
+echo https://github.com/381-bas/Plan/compare/main...%CUR%
+
 endlocal
