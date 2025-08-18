@@ -58,4 +58,20 @@ def cargar_modulo_si_valido(nombre_modulo: str):
                 f"❌ El módulo '{nombre_modulo}' no tiene una función `run()` definida."
             )
     except Exception as e:
-        st.error(f"❌ Error al cargar el módulo '{nombre_modulo}': {e}")
+        # ── Manejo robusto de rerun de Streamlit (navegación / query_params) ──
+        try:
+            from streamlit.runtime.scriptrunner import RerunException, RerunData
+
+            if isinstance(e, (RerunException, RerunData)):
+                raise  # dejar que Streamlit haga el rerun sin ensuciar la UI
+        except Exception:
+            # Fallback: por si cambia la ruta de clases entre versiones
+            if e.__class__.__name__ in ("RerunException", "RerunData"):
+                raise
+
+        # Si NO es un rerun, mostramos el error real
+        safe_name = (
+            locals().get("nombre_modulo") or locals().get("modulo") or "desconocido"
+        )
+        st.error(f"❌ Error al cargar el módulo '{safe_name}': {e}")
+        st.stop()

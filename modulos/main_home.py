@@ -1,7 +1,7 @@
 ﻿# B_CTX001: Importaciones principales y obtención de contexto para el forecast inverso
 # # ∂B_CTX001/∂B0
 import streamlit as st
-
+from streamlit.runtime.scriptrunner import RerunException, RerunData
 from utils.db import (
     _run_home_select,
 )
@@ -70,4 +70,11 @@ def run():
                 st.markdown(f"**{row['SlpCode']} – {row['SlpName']}**")
 
     except Exception as e:
-        st.warning(f"❌ No se pudo cargar la lista de vendedores con forecast: {e}")
+        try:
+            if isinstance(e, (RerunException, RerunData)):
+                raise
+        except Exception:
+            if e.__class__.__name__ in ("RerunException", "RerunData"):
+                raise
+        st.error(f"❌ Error en inicio: {e}")
+        st.stop()
