@@ -24,7 +24,6 @@ from utils.repositorio_forecast.repositorio_forecast_editor import (
     inicializar_buffer_cliente,  # ∂B
     validar_forecast_dataframe,  # ∂B
     sincronizar_buffer_edicion,  # ∂B
-    actualizar_buffer_global,  # ∂B
     sincronizar_buffer_local,  # ∂B
 )
 from utils.utils_buffers import (
@@ -32,8 +31,18 @@ from utils.utils_buffers import (
     sincronizar_para_guardado_final,
 )
 from utils.db import DB_PATH
-from services.sync import guardar_temp_local
 from modulos.ventas_facturas_snippet import mostrar_facturas
+
+
+# ── Helper: detectar excepciones de rerun de Streamlit ───────────────
+def _es_rerun(e: Exception) -> bool:
+    try:
+        # Compat con distintas versiones de Streamlit
+        from streamlit.runtime.scriptrunner import RerunException, RerunData
+
+        return isinstance(e, (RerunException, RerunData))
+    except Exception:
+        return False
 
 
 # B_HDF001: Normalización profunda de DataFrame para comparación estructural
@@ -155,7 +164,7 @@ def vista_forecast(slpcode, cardcode):
     )
 
     # -----------------------------------------------------------------
-    # 7️⃣  ───────────  Configuración del DataEditor  ───────────
+    # 7️⃣  ───────────  Configuración del Editor (sin autosave/persist) ───────────
     column_config_forecast = {
         "ItemCode": column_config.TextColumn(label="Cod"),
         "TipoForecast": column_config.TextColumn(label="Tipo"),
@@ -173,15 +182,14 @@ def vista_forecast(slpcode, cardcode):
         df_filtrado,
         key=f"editor_forecast_{cardcode}",
         use_container_width=True,
-        num_rows="fixed",  # "dynamic" para agregar Item´s nuevos a la tabla
-        height=len(df_filtrado) * 35 + 40,  # sin límite superior
+        num_rows="fixed",  # "dynamic" si en el futuro habilitas agregar filas
+        height=len(df_filtrado) * 35 + 40,  # ajusta si lo prefieres
         column_order=columnas_ordenadas,
         column_config=column_config_forecast,
     )
 
     # -----------------------------------------------------------------
-    # 8️⃣  ───────────  Sincronización y detección de cambios  ───────────
-    # ~~Se eliminan validaciones dupes y hashes inconsistentes~~
+    # 8️⃣  ───────────  Detección de cambios (solo staging en sesión) ───────────
     df_actualizado, hay_cambios = sincronizar_buffer_local(df_buffer, df_editado)
 
     print(f"[DEBUG-VISTA] Cliente actual: {cardcode}")
@@ -193,33 +201,38 @@ def vista_forecast(slpcode, cardcode):
     except Exception as e:
         print(f"[ERROR-VISTA] No se pudo calcular hash_actual: {e}")
         hash_actual = 0
-    hash_previo = st.session_state.get(hash_key)
 
-    # -----------------------------------------------------------------
-    # 9️⃣  ───────────  Manejo de flujo según cambios  ───────────
-    if not hay_cambios and hash_actual == hash_previo:
-        pass
+    if hash_key not in st.session_state:
+        # Primera huella: evita marcar “cambios” al cargar por primera vez
+        st.session_state[hash_key] = hash_actual
+
+    hash_previo = st.session_state[hash_key]
+    hay_nuevos = bool(hay_cambios and hash_actual != hash_previo)
+
+    # Si hay diferencias reales, SOLO "etapear" en memoria (sin backup ni éxito)
+    if hay_nuevos:
+        # 9.1  Actualizar buffer de sesión (staging)
+        st.session_state[key_buffer] = df_actualizado.set_index(
+            ["ItemCode", "TipoForecast", "Métrica"]
+        )
+
+        # 9.2  Marcar cliente como “editado” para el guardado final multi-cliente
+        editados = st.session_state.get("clientes_editados", set())
+        editados.add(cardcode)
+        st.session_state["clientes_editados"] = editados
+
+        # 9.3  Actualizar huella para evitar loop de detección
+        st.session_state[hash_key] = hash_actual
+
+        # 9.4  Señal sutil de estado (sin éxito/persistencia)
+        st.caption(
+            "📝 Cambios en preparación (se guardarán con «💾 Guardar forecast en base de datos»)."
+        )
     else:
-        if hay_cambios:
-            # 9.1  Actualizar buffer en sesión
-            st.session_state[key_buffer] = df_actualizado.set_index(
-                ["ItemCode", "TipoForecast", "Métrica"]
-            )
-
-            # 9.2  Backup y buffer global
-            guardar_temp_local(key_buffer, df_actualizado)
-            actualizar_buffer_global(df_actualizado, key_buffer)
-
-            # 9.3  Marcar cliente como editado
-            editados = st.session_state.get("clientes_editados", set())
-            editados.add(cardcode)
-            st.session_state["clientes_editados"] = editados
-
-            st.success("✅ Cambios registrados exitosamente")
-            st.session_state[hash_key] = hash_actual
-            st.rerun()
-        else:
-            st.session_state[hash_key] = hash_actual
+        # Si no hay nuevos cambios, puedes opcionalmente mostrar la selección actual
+        st.caption(
+            "✏️ Edita y luego usa «💾 Guardar forecast en base de datos» para persistir."
+        )
 
     # -----------------------------------------------------------------
     # 🔟  ───────────  Validación final & opciones de guardado  ───────────
@@ -282,26 +295,33 @@ def run():
         print(f"[SYMBIOS][ventas] Error en bloque línea 275: {e}")
         raise
 
-    tabs = st.tabs(
-        [
-            "📋 Forecast",
-            "📦 Stock",
-            "📈 Histórico",
-            "🧠 Ayuda",
-            "🚨 Alertas Forecast",
-            "📑 Facturas",
-        ]
-    )
+    try:
+        tabs = st.tabs(
+            [
+                "📋 Forecast",
+                "📦 Stock",
+                "📈 Histórico",
+                "🧠 Ayuda",
+                "🚨 Alertas Forecast",
+                "📑 Facturas",
+            ]
+        )
 
-    with tabs[0]:
-        vista_forecast(slpcode, None)
-    with tabs[1]:
-        vista_stock(slpcode, None)
-    with tabs[2]:
-        vista_historico(slpcode, None)
-    with tabs[3]:
-        vista_ayuda()
-    with tabs[4]:
-        render_alertas_forecast(slpcode)
-    with tabs[5]:
-        mostrar_facturas()
+        with tabs[0]:
+            vista_forecast(slpcode, None)
+        with tabs[1]:
+            vista_stock(slpcode, None)
+        with tabs[2]:
+            vista_historico(slpcode, None)
+        with tabs[3]:
+            vista_ayuda()
+        with tabs[4]:
+            render_alertas_forecast(slpcode)
+        with tabs[5]:
+            mostrar_facturas()
+    except Exception as e:
+        # Evita mostrar Rerun/Redirect internos como error de usuario
+        if _es_rerun(e):
+            raise
+        st.error(f"❌ No se pudo cargar la lista de vendedores con forecast: {e}")
+        st.stop()
