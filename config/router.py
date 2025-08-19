@@ -29,6 +29,11 @@ MODULOS_DISPONIBLES = {
 }
 
 
+# --- PATCH: detector de Rerun para no mostrarlo como error
+def _is_rerun_exc(e: Exception) -> bool:
+    return e.__class__.__name__ in ("RerunException", "RerunData")
+
+
 # B_ROUT002: Función para cargar y validar módulo según nombre y permisos de rol
 # # ∂B_ROUT002/∂B0
 def cargar_modulo_si_valido(nombre_modulo: str):
@@ -48,6 +53,14 @@ def cargar_modulo_si_valido(nombre_modulo: str):
             )
             return
 
+    # --- PATCH: gating de 'ventas' sin vendedor → redirige limpio a inicio
+    if nombre_modulo == "ventas":
+        vendedor = st.query_params.get("vendedor")
+        if vendedor is None or f"{vendedor}".strip() == "":
+            st.info("Selecciona un vendedor para continuar.")
+            st.query_params.update({"modulo": "inicio"})
+            st.rerun()
+
     # 3.3 – Importación y ejecución
     try:
         mod = importlib.import_module(MODULOS_DISPONIBLES[nombre_modulo])
@@ -58,4 +71,7 @@ def cargar_modulo_si_valido(nombre_modulo: str):
                 f"❌ El módulo '{nombre_modulo}' no tiene una función `run()` definida."
             )
     except Exception as e:
+        # --- PATCH: no reportar Rerun como error
+        if _is_rerun_exc(e):
+            raise
         st.error(f"❌ Error al cargar el módulo '{nombre_modulo}': {e}")

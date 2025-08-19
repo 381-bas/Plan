@@ -99,50 +99,6 @@ def sincronizar_para_guardado_final(
 
 
 # ---------------------------------------------------------------------------
-# Helper: obtener el último ForecastID vigente para un cliente/año/vendedor
-# ---------------------------------------------------------------------------
-def _get_last_id(slpcode: int, cardcode: str, anio: int, db_path: str) -> Optional[int]:
-    """
-    Devuelve el MAX(ForecastID) **anterior** al que se está creando.
-    Si no existe uno individual por cliente-vendedor, intenta recuperar uno base global
-    donde el cliente haya participado (cualquier vendedor).
-    """
-    # 🟢 Intento 1: Forecast individual cliente + vendedor
-    qry_individual = """
-        SELECT MAX(ForecastID) AS id              
-        FROM   Forecast_Detalle
-        WHERE  SlpCode  = ?
-          AND  CardCode = ?
-          AND  strftime('%Y', FechEntr) = ?;
-    """
-    df = run_query(
-        qry_individual, params=(slpcode, cardcode, str(anio)), db_path=db_path
-    )
-
-    if not df.empty and pd.notna(df.iloc[0].id):
-        forecast_id = int(df.iloc[0].id)
-        print(f"[DEBUG-ID] ForecastID individual encontrado: {forecast_id}")
-        return forecast_id
-
-    # 🟡 Intento 2: Forecast base global por cliente (sin importar SlpCode)
-    qry_global = """
-        SELECT MAX(ForecastID) AS id              
-        FROM   Forecast_Detalle
-        WHERE  CardCode = ?
-          AND  strftime('%Y', FechEntr) = ?;
-    """
-    df_global = run_query(qry_global, params=(cardcode, str(anio)), db_path=db_path)
-
-    if not df_global.empty and pd.notna(df_global.iloc[0].id):
-        forecast_id = int(df_global.iloc[0].id)
-        print(f"[🟡 DEBUG-ID] Fallback a ForecastID base global: {forecast_id}")
-        return forecast_id
-
-    print("[⚠️ DEBUG-ID] Sin ForecastID previo (ni individual ni global)")
-    return None
-
-
-# ---------------------------------------------------------------------------
 # Helper: enriquecer DF_LARGO con Cant_Anterior y filtrar cambios reales
 # ---------------------------------------------------------------------------
 
