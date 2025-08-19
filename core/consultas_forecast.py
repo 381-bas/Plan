@@ -57,47 +57,42 @@ def obtener_forecast_editable(
     db_path: str = DB_PATH,
 ) -> pd.DataFrame:
     """
-    Devuelve el forecast editable (cantidad, precio UN, moneda) en formato ancho 01-12.
-
-    Parámetros
-    ----------
-    slp_code   : vendedor (SlpCode)
-    card_code  : cliente (CardCode)
-    anio       : año a filtrar; si es None trae todos
-    db_path    : ruta a la BD SQLite
+    Devuelve el forecast editable en formato ancho 01-12, con Métrica ∈ {Cantidad, Precio}.
     """
-    # ────────────────────────────── filtros reutilizables ──────────────────────────────
-    filtro_anio = "AND strftime('%Y', FechEntr) = ?" if anio else ""
-    # mismos filtros se usan en CTE base y en SELECT final
-    # ────────────────────────────────── query SQL ──────────────────────────────────────
+    print(
+        f"\n=== Inicio consulta forecast: SLP={slp_code}, Cliente={card_code}, Año={anio} ==="
+    )
+
+    filtro_anio = "AND strftime('%Y', fd.FechEntr) = ?" if anio else ""
+
     query = f"""
-    WITH base AS (                           -- 1️⃣ registros del detalle
+    WITH base AS (
         SELECT
-            ItemCode,
-            TipoForecast,
-            OcrCode3,
-            CAST(strftime('%m', FechEntr) AS TEXT) AS Mes,
-            Cant,
-            ForecastID
-        FROM Forecast_Detalle
-        WHERE SlpCode  = ?
-          AND CardCode = ?
+            fd.ItemCode,
+            fd.TipoForecast,
+            fd.OcrCode3,
+            CAST(strftime('%m', fd.FechEntr) AS TEXT) AS Mes,
+            fd.Cant,
+            fd.PrecioUN,
+            fd.DocCur,
+            fd.ForecastID
+        FROM Forecast_Detalle fd
+        WHERE fd.SlpCode  = ?
+          AND fd.CardCode = ?
           {filtro_anio}
     ),
-    ultimo AS (                              -- 2️⃣ sólo la última versión por clave
-        SELECT *
-        FROM (
-            SELECT
-                base.*,
-                ROW_NUMBER() OVER (
+    rankeado AS (
+        SELECT base.*,
+               ROW_NUMBER() OVER (
                     PARTITION BY ItemCode, TipoForecast, OcrCode3, Mes
                     ORDER BY ForecastID DESC
-                ) AS rn
-            FROM base
-        )
-        WHERE rn = 1
+               ) AS rn
+        FROM base
     ),
-    catalogo AS (                            -- 3️⃣ item × tipo
+    ultimo AS (
+        SELECT * FROM rankeado WHERE rn = 1
+    ),
+    catalogo AS (
         SELECT
             i.ItemCode,
             i.ItemName,
@@ -113,41 +108,33 @@ def obtener_forecast_editable(
         c.ItemCode,
         c.ItemName,
         c.TipoForecast,
-        fd.OcrCode3,
-        CAST(strftime('%m', fd.FechEntr) AS INTEGER) AS Mes,
-        SUM(fd.Cant)     AS Cantidad,
-        AVG(fd.PrecioUN) AS PrecioUN,
-        MAX(fd.DocCur)   AS DocCur
+        u.OcrCode3,
+        u.Mes AS Mes,                          -- puede venir NULL → se sanea en Python
+        SUM(COALESCE(u.Cant,0))        AS Cantidad,
+        AVG(COALESCE(u.PrecioUN,0))    AS PrecioUN,
+        MAX(COALESCE(u.DocCur,'CLP'))  AS DocCur
     FROM catalogo c
-    LEFT JOIN Forecast_Detalle fd            -- sólo registros del forecast vigente
-           ON  c.ItemCode     = fd.ItemCode
-           AND c.TipoForecast = fd.TipoForecast
-    JOIN  ultimo u                           -- garantie versión más reciente
-           ON  fd.ForecastID   = u.ForecastID
-           AND fd.ItemCode     = u.ItemCode
-           AND fd.TipoForecast = u.TipoForecast
-           AND fd.OcrCode3     = u.OcrCode3
-           AND CAST(strftime('%m', fd.FechEntr) AS TEXT) = u.Mes
-    WHERE  fd.CardCode = ?
-      {filtro_anio}
+    LEFT JOIN ultimo u
+           ON  c.ItemCode     = u.ItemCode
+           AND c.TipoForecast = u.TipoForecast
     GROUP BY
-        c.ItemCode, c.ItemName, c.TipoForecast, fd.OcrCode3, Mes
+        c.ItemCode, c.ItemName, c.TipoForecast, u.OcrCode3, Mes
     ORDER BY
         c.ItemCode, c.TipoForecast, Mes;
     """
 
-    # ─────────────────── parámetros en el mismo orden que los ? ────────────────────
     params: list[Any] = [slp_code, card_code]
     if anio:
-        params.append(str(anio))  # CTE base
-    params.append(card_code)  # WHERE final
-    if anio:
-        params.append(str(anio))  # WHERE final
+        params.append(str(anio))
 
+    print(f"Ejecutando query con parámetros: {params}")
     df = run_query(query, db_path, tuple(params))
+    print(f"Registros obtenidos: {len(df)}")
 
-    # ────────────────────────────── pivot + enriquecimiento ──────────────────────────
+    # Skeleton vacío con dos métricas (Cantidad/Precio)
+    cols_meses = [f"{m:02d}" for m in range(1, 13)]
     if df.empty:
+        print("WARNING: DataFrame inicial vacío")
         return pd.DataFrame(
             columns=[
                 "ItemCode",
@@ -155,48 +142,155 @@ def obtener_forecast_editable(
                 "TipoForecast",
                 "Métrica",
                 "OcrCode3",
-                "PrecioUN",
                 "DocCur",
-                *[str(m).zfill(2) for m in range(1, 13)],
+                *cols_meses,
             ]
         )
 
-    pivot = df.pivot_table(
-        index=["ItemCode", "ItemName", "TipoForecast", "OcrCode3"],
+    print("\nValidando mes y datos...")
+    df["Mes"] = pd.to_numeric(df["Mes"], errors="coerce")
+    print(f"Meses encontrados: {sorted(df['Mes'].unique().tolist())}")
+
+    df = df[(df["Mes"] >= 1) & (df["Mes"] <= 12)]
+    if df.empty:
+        print("WARNING: DataFrame vacío después de filtrar meses")
+        return pd.DataFrame(
+            columns=[
+                "ItemCode",
+                "ItemName",
+                "TipoForecast",
+                "Métrica",
+                "OcrCode3",
+                "DocCur",
+                *cols_meses,
+            ]
+        )
+
+    df["Mes"] = df["Mes"].astype(int).astype(str).str.zfill(2)
+    print("Conversión de mes completada")
+
+    print("\nAplicando valores por defecto...")
+    if "OcrCode3" in df.columns:
+        df["OcrCode3"] = df["OcrCode3"].fillna("")
+    if "DocCur" in df.columns:
+        df["DocCur"] = df["DocCur"].fillna("CLP")
+    if "PrecioUN" in df.columns:
+        df["PrecioUN"] = pd.to_numeric(df["PrecioUN"], errors="coerce").fillna(0.0)
+    if "Cantidad" in df.columns:
+        df["Cantidad"] = pd.to_numeric(df["Cantidad"], errors="coerce").fillna(0.0)
+
+    print("\nPreparando pivot tables...")
+    df_cant = df.copy()
+    df_cant["Métrica"] = "Cantidad"
+    pivot_cant = df_cant.pivot_table(
+        index=["ItemCode", "ItemName", "TipoForecast", "OcrCode3", "DocCur", "Métrica"],
         columns="Mes",
         values="Cantidad",
+        aggfunc="sum",
         fill_value=0,
     ).reset_index()
+    print(f"Pivot Cantidad shape: {pivot_cant.shape}")
 
-    # PrecioUN y DocCur (una sola fila por clave ⇒ avg / first son seguros)
-    precio_un = df.groupby(["ItemCode", "TipoForecast", "OcrCode3"], as_index=False)[
-        "PrecioUN"
-    ].mean()
-    doc_cur = df.groupby(["ItemCode", "TipoForecast", "OcrCode3"], as_index=False)[
-        "DocCur"
-    ].first()
+    df_prec = df.copy()
+    df_prec["Métrica"] = "Precio"
+    pivot_prec = df_prec.pivot_table(
+        index=["ItemCode", "ItemName", "TipoForecast", "OcrCode3", "DocCur", "Métrica"],
+        columns="Mes",
+        values="PrecioUN",
+        aggfunc="last",
+        fill_value=0,
+    ).reset_index()
+    print(f"Pivot Precio shape: {pivot_prec.shape}")
 
-    pivot = pivot.merge(precio_un, on=["ItemCode", "TipoForecast", "OcrCode3"]).merge(
-        doc_cur, on=["ItemCode", "TipoForecast", "OcrCode3"]
+    df_metrico = pd.concat([pivot_cant, pivot_prec], ignore_index=True)
+    print(f"\nShape final después de concat: {df_metrico.shape}")
+
+    for mes in cols_meses:
+        if mes not in df_metrico.columns:
+            print(f"Agregando mes faltante: {mes}")
+            df_metrico[mes] = 0
+
+    # === NUEVO: asegurar líneas Proyectado (Cantidad=0) y Precio solo en meses con cantidad (Firme o Proyectado) ===
+    print(
+        "\nAsegurando filas 'Proyectado' para cada SKU (Cantidad=0, Precio=Firme SOLO en meses c/ cantidad)..."
     )
+    MESES = cols_meses
+    base_keys = ["ItemCode", "ItemName", "OcrCode3", "DocCur"]
+    dfs = [df_metrico]
 
-    # Normaliza nombres 01-12
-    pivot.columns = [
-        str(c).zfill(2) if isinstance(c, int) else c for c in pivot.columns
+    grupos = df_metrico.groupby(base_keys, dropna=False)
+    print(f"Grupos base encontrados: {len(grupos)}")
+
+    faltantes_total = 0
+    for keys, g in grupos:
+        tipos = set(g["TipoForecast"].astype(str).unique().tolist())
+        if "Firme" in tipos and "Proyectado" not in tipos:
+            # Precio base desde Firme/Precio (si existe)
+            precio_firme = g[
+                (g["TipoForecast"] == "Firme") & (g["Métrica"] == "Precio")
+            ]
+
+            # Máscara de meses con cantidad > 0 en CUALQUIER tipo (Firme o Proyectado)
+            qty_rows = g[g["Métrica"] == "Cantidad"]
+            qty_mask = {}
+            for m in MESES:
+                has_qty = False
+                for _, rq in qty_rows.iterrows():
+                    try:
+                        has_qty = has_qty or (float(rq.get(m, 0) or 0) > 0)
+                    except Exception:
+                        pass
+                qty_mask[m] = has_qty
+            print(
+                "Máscara meses con cantidad>0:",
+                {m: int(v) for m, v in qty_mask.items()},
+            )
+
+            # Construcción de filas Proyectado
+            base = dict(zip(base_keys, keys))
+            fila_cant = {"TipoForecast": "Proyectado", "Métrica": "Cantidad", **base}
+            fila_prec = {"TipoForecast": "Proyectado", "Métrica": "Precio", **base}
+
+            # Valores por mes
+            if precio_firme.empty:
+                # sin precio base → todo 0
+                for m in MESES:
+                    fila_cant[m] = 0.0
+                    fila_prec[m] = 0.0
+            else:
+                rprice = precio_firme.iloc[0]
+                for m in MESES:
+                    fila_cant[m] = 0.0
+                    # Copia precio solo si hay cantidad en ese mes (en Firme o Proyectado)
+                    fila_prec[m] = float(rprice[m]) if qty_mask[m] else 0.0
+
+            dfs.append(pd.DataFrame([fila_cant, fila_prec]))
+            faltantes_total += 2
+
+    if faltantes_total:
+        print(f"Filas Proyectado generadas: {faltantes_total}")
+    else:
+        print("No fue necesario generar filas Proyectado adicionales.")
+
+    df_metrico = pd.concat(dfs, ignore_index=True)
+
+    orden = [
+        "ItemCode",
+        "ItemName",
+        "TipoForecast",
+        "Métrica",
+        "OcrCode3",
+        "DocCur",
+        *cols_meses,
     ]
-    for m in range(1, 13):
-        col = str(m).zfill(2)
-        if col not in pivot.columns:
-            pivot[col] = 0
-
-    pivot["Métrica"] = "Cantidad"
-
-    orden = (
-        ["ItemCode", "ItemName", "TipoForecast", "Métrica", "OcrCode3"]
-        + [str(m).zfill(2) for m in range(1, 13)]
-        + ["PrecioUN", "DocCur"]
+    df_metrico = (
+        df_metrico[orden]
+        .sort_values(["ItemCode", "TipoForecast", "Métrica"])
+        .reset_index(drop=True)
     )
-    return pivot[orden]
+
+    print("\n=== Proceso completado exitosamente ===")
+    return df_metrico
 
 
 # B_FCS006: Consulta de stock disponible para lista de ítems
