@@ -15,7 +15,6 @@ from services.forecast_engine import (
     insertar_forecast_detalle,
     registrar_log_detalle_cambios,
     obtener_forecast_activo,
-    logger,
 )
 from services.sync import guardar_temp_local  # ∂B49
 from config.contexto import obtener_slpcode
@@ -23,19 +22,12 @@ from config.contexto import obtener_slpcode
 
 # B_SYN002: Sincronización y guardado individual de buffer editado para cliente
 # # ∂B_SYN002/∂B0
-def sincronizar_para_guardado_final(
-    key_buffer: str, df_editado: pd.DataFrame
-) -> pd.DataFrame:
-    """
-    Sincroniza los datos editados con el buffer en sesión y,
-    si hubo modificaciones reales en columnas de mes, deja el
-    DataFrame listo para la inserción en BD.
-
-    Devuelve siempre un DataFrame (aunque no haya cambios),
-    pero solo marca al cliente como editado cuando hay delta.
-    """
-    print(f"[DEBUG-SYNC] Iniciando sincronización para {key_buffer}")
-    print(f"[DEBUG-SYNC] Tamaño DF editado recibido: {df_editado.shape}")
+def sincronizar_para_guardado_final(key_buffer: str, df_editado: pd.DataFrame):
+    print(f"[DEBUG-SYNC-FINAL] 🎯 Inicio sincronización - Buffer: {key_buffer}")
+    print(f"[DEBUG-SYNC-FINAL] DataFrame inicial - Shape: {df_editado.shape}")
+    print(
+        f"[DEBUG-SYNC-FINAL] Estado session_state pre-sync: {list(st.session_state.keys())}"
+    )
 
     # 🔀 1) Unificación de métricas Cantidad + Precio
     df_editado_unificado = pd.concat(
@@ -94,6 +86,13 @@ def sincronizar_para_guardado_final(
     editados.add(cliente)
     st.session_state["clientes_editados"] = editados
     print(f"[DEBUG-SYNC] Cliente marcado como editado: {cliente}")
+
+    # Nuevos logs de depuración
+    print(f"[DEBUG-SAVE-SYNC] Estado de sincronización - key_buffer: {key_buffer}")
+    print(
+        f"[DEBUG-SAVE-SYNC] Hash del DataFrame antes de sincronizar: {hash(str(df_editado.values.tobytes()))}"
+    )
+    print("[DEBUG-SAVE-SYNC] Verificando si ya existe una sincronización en progreso")
 
     return df_guardar
 
@@ -308,98 +307,146 @@ def _enriquecer_y_filtrar(
 
 
 def _refrescar_buffer_ui(forecast_id: int, key_buffer: str, db_path: str):
-    """Reconstruye las dos métricas (Cantidad / Precio) y refresca sesión Streamlit."""
+    """
+    Reconstruye el buffer de UI SOLO desde BD para el ForecastID activo,
+    deduplicando por clave de negocio y sin sumar registros duplicados.
 
+    Requisitos:
+      - Función helper: run_query(sql, params=(), db_path=None) -> DataFrame
+      - Motor: SQLite (usa ROWID para ordenar "el último").
+    """
     print(
         f"[DEBUG-BUFFER] 🔁 Refrescando UI para ForecastID={forecast_id}, buffer={key_buffer}"
     )
 
+    # 1) Traer SOLO el detalle del ForecastID activo (sin Timestamp/ID)
     qry = """
-        SELECT ItemCode, TipoForecast, OcrCode3, Linea, DocCur,
-               CAST(strftime('%m', FechEntr) AS TEXT) AS Mes,
-               Cant, PrecioUN
-        FROM   Forecast_Detalle
-        WHERE  ForecastID = ?
+        SELECT
+            ItemCode,
+            TipoForecast,
+            OcrCode3,
+            Linea,
+            DocCur,
+            CAST(strftime('%m', FechEntr) AS TEXT) AS Mes,
+            Cant,
+            PrecioUN,
+            ROWID AS _rid
+        FROM Forecast_Detalle
+        WHERE ForecastID = ?
     """
     df_post = run_query(qry, params=(forecast_id,), db_path=db_path)
 
-    if df_post.empty:
+    if df_post is None or df_post.empty:
         print(
             f"[DEBUG-BUFFER] ⚠️ No se encontraron registros en Forecast_Detalle para ID={forecast_id}"
         )
+        st.session_state[key_buffer] = None
         return
 
     print(f"[DEBUG-BUFFER] Registros recuperados: {len(df_post)}")
 
-    cols_meses = [f"{m:02d}" for m in range(1, 13)]
+    # 2) Normalizar Mes a '01'..'12'
+    df_post["Mes"] = df_post["Mes"].astype(str).str.zfill(2)
 
-    # --- Cantidad
-    df_cant = (
-        df_post.copy()
-        .groupby(
-            ["ItemCode", "TipoForecast", "OcrCode3", "Linea", "DocCur", "Mes"],
-            as_index=False,
+    # 3) Ordenar para que 'last' sea realmente el último registro insertado
+    sort_cols = []
+    if "FechEntr" in df_post.columns:
+        sort_cols.append("FechEntr")
+    sort_cols.append("_rid")  # siempre existe en SQLite
+    df_post = df_post.sort_values(sort_cols)
+
+    # 4) Deduplicar por clave de negocio a nivel de mes
+    claves_mes = ["ItemCode", "TipoForecast", "OcrCode3", "DocCur", "Mes"]
+    df_dedup = df_post.drop_duplicates(claves_mes, keep="last").copy()
+
+    # 5) Mapear 'Linea' representativa (última) por clave sin Mes
+    clave_sin_mes = ["ItemCode", "TipoForecast", "OcrCode3", "DocCur"]
+    linea_map = df_dedup.groupby(clave_sin_mes, as_index=False)["Linea"].last()
+
+    # 6) Pivots sin agregar por suma (usar último valor)
+    meses = [f"{i:02d}" for i in range(1, 13)]
+
+    # Cantidad
+    pivot_cant = (
+        df_dedup.pivot_table(
+            index=clave_sin_mes,
+            columns="Mes",
+            values="Cant",
+            aggfunc="last",
+            fill_value=0.0,
         )
-        .agg({"Cant": "sum"})
+        .reindex(columns=meses, fill_value=0.0)
+        .reset_index()
     )
-    df_cant["Métrica"] = "Cantidad"
-    pivot_cant = df_cant.pivot_table(
-        index=["ItemCode", "TipoForecast", "OcrCode3", "Linea", "DocCur", "Métrica"],
-        columns="Mes",
-        values="Cant",
-        aggfunc="first",
-    ).reindex(columns=cols_meses, fill_value=0)
+    pivot_cant["Métrica"] = "Cantidad"
 
-    # --- Precio (ahora defensivo también)
-    df_prec = (
-        df_post.copy()
-        .groupby(
-            ["ItemCode", "TipoForecast", "OcrCode3", "Linea", "DocCur", "Mes"],
-            as_index=False,
+    # Precio
+    pivot_prec = (
+        df_dedup.pivot_table(
+            index=clave_sin_mes,
+            columns="Mes",
+            values="PrecioUN",
+            aggfunc="last",
+            fill_value=0.0,
         )
-        .agg({"PrecioUN": "mean"})
+        .reindex(columns=meses, fill_value=0.0)
+        .reset_index()
     )
-    df_prec["Métrica"] = "Precio"
-    pivot_prec = df_prec.pivot_table(
-        index=["ItemCode", "TipoForecast", "OcrCode3", "Linea", "DocCur", "Métrica"],
-        columns="Mes",
-        values="PrecioUN",
-        aggfunc="first",
-    ).reindex(columns=cols_meses, fill_value=0)
+    pivot_prec["Métrica"] = "Precio"
 
-    # --- Unión y limpieza
-    df_metrico = pd.concat([pivot_cant, pivot_prec])
-    df_metrico = df_metrico.reset_index()
+    # 7) Unir métricas y re-incorporar 'Linea'
+    df_metrico = pd.concat([pivot_cant, pivot_prec], ignore_index=True)
+    df_metrico = df_metrico.merge(linea_map, on=clave_sin_mes, how="left")
 
-    # Ordenar columnas: fijas + meses
+    # 8) Reordenar columnas finales
     cols_fijas = ["ItemCode", "TipoForecast", "OcrCode3", "Linea", "DocCur", "Métrica"]
-    df_metrico = df_metrico[cols_fijas + cols_meses]
-
-    # Ordenar filas visualmente
-    df_metrico = df_metrico.sort_values(
-        by=["ItemCode", "TipoForecast", "Métrica"]
-    ).reset_index(drop=True)
+    df_metrico = (
+        df_metrico[cols_fijas + [m for m in meses if m in df_metrico.columns]]
+        .sort_values(by=["ItemCode", "TipoForecast", "Métrica"])
+        .reset_index(drop=True)
+    )
 
     print(f"[DEBUG-BUFFER] Columnas finales: {df_metrico.columns.tolist()}")
     print(f"[DEBUG-BUFFER] Buffer final generado. Filas: {len(df_metrico)}")
 
+    # 9) Persistir en sesión con el mismo índice que ya usas
     st.session_state[key_buffer] = df_metrico.set_index(
         ["ItemCode", "TipoForecast", "Métrica"]
     )
-    # st.dataframe(df_metrico)
-    logger.info("Buffer UI refrescado para %s", key_buffer)
+
+    print(f"[DEBUG-BUFFER-REFRESH] Inicio refresh UI - key_buffer: {key_buffer}")
+    print(
+        f"[DEBUG-BUFFER-REFRESH] Estado buffer antes: {st.session_state.get(key_buffer, 'No existe')}"
+    )
+    print("[DEBUG-BUFFER-REFRESH] Completado refresh UI")
 
 
 # B_SYN003: Guardado estructurado y seguro de buffers editados de todos los clientes
 # # ∂B_SYN003/∂B0
 def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
+    print("[DEBUG-SAVE-MAIN] 🚀 Iniciando proceso de guardado")
+    print(f"[DEBUG-SAVE-MAIN] Session state actual: {list(st.session_state.keys())}")
+    print(
+        f"[DEBUG-SAVE-MAIN] Clientes editados: {st.session_state.get('clientes_editados', set())}"
+    )
+
     clientes = st.session_state.get("clientes_editados", set()).copy()
     print(f"[DEBUG-GUARDADO] Clientes a procesar: {sorted(clientes)}")
     if not clientes:
         st.info("✅ No hay cambios pendientes por guardar")
         return
 
+    print("[DEBUG-SAVE-BATCH] Inicio de guardado batch")
+    print(f"[DEBUG-SAVE-BATCH] Total clientes a procesar: {len(clientes)}")
+    print(f"[DEBUG-SAVE-BATCH] Estado session_state antes: {dict(st.session_state)}")
+
     for cliente in clientes:
+        print(f"\n[DEBUG-SAVE-MAIN] 📝 Procesando cliente: {cliente}")
+        print(f"[DEBUG-SAVE-MAIN] Buffer key: forecast_buffer_cliente_{cliente}")
+        print(
+            f"[DEBUG-SAVE-MAIN] Estado buffer pre-guardado: {st.session_state.get(f'forecast_buffer_cliente_{cliente}', 'No existe')}"
+        )
+
         key_buffer = f"forecast_buffer_cliente_{cliente}"
         if key_buffer not in st.session_state:
             print(f"[WARN] Buffer no encontrado en sesión para {cliente}")
@@ -484,11 +531,29 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
             )
 
             print("[DEBUG-GUARDADO] Paso 6: Insertando forecast detalle en BD")
+            print(
+                f"[DEBUG-SAVE-INSERT] Preparando inserción para ForecastID={forecast_id}"
+            )
+            print(
+                f"[DEBUG-SAVE-INSERT] Shape del DataFrame a insertar: {df_largo_filtrado.shape}"
+            )
+            print("[DEBUG-SAVE-INSERT] Verificando duplicados antes de inserción:")
+            print(
+                df_largo_filtrado.groupby(["ItemCode", "TipoForecast", "Mes"])
+                .size()
+                .reset_index(name="count")
+            )
+
             insertar_forecast_detalle(
                 df_largo_filtrado.assign(ForecastID=forecast_id),
                 forecast_id,
                 anio,
                 db_path,
+            )
+
+            print("[DEBUG-SAVE-INSERT] Inserción completada")
+            print(
+                f"[DEBUG-SAVE-INSERT] Estado session_state después: {dict(st.session_state)}"
             )
 
             print("[DEBUG-GUARDADO] Paso 7: Refrescando buffer UI post-guardado")

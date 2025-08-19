@@ -39,6 +39,7 @@ def insertar_forecast_detalle(
     """
     Inserta (o reemplaza) el detalle de un Forecast.
     ▸ No exige 'FechEntr' de entrada: la construye desde anio+Mes.
+    ▸ IMPORTANTE: un solo INSERT; se elimina el bloque duplicado.
     """
     import pandas as pd
 
@@ -64,10 +65,10 @@ def insertar_forecast_detalle(
     if missing:
         raise ValueError(f"[ERROR-DETALLE] ❌ Faltan columnas requeridas: {missing}")
 
+    # 1) Normalización
     df = df_detalle.copy()
     print(f"[DEBUG-DETALLE] Registros a procesar (original): {len(df)}")
 
-    # Normalización
     df["Mes"] = df["Mes"].astype(str).str.zfill(2)
     df["Cant"] = (
         pd.to_numeric(df["Cant"], errors="coerce").fillna(0.0).astype("float64")
@@ -76,26 +77,25 @@ def insertar_forecast_detalle(
         pd.to_numeric(df["PrecioUN"], errors="coerce").fillna(0.0).astype("float64")
     )
 
-    # Agrupación defensiva por clave lógica
+    # Garantizar 1 fila por clave de negocio (no generar duplicados)
     df = df.groupby(
         [
             "CardCode",
             "ItemCode",
             "TipoForecast",
             "OcrCode3",
-            "Mes",
             "Linea",
+            "Mes",
             "DocCur",
             "SlpCode",
         ],
         as_index=False,
     ).agg({"Cant": "sum", "PrecioUN": "mean"})
 
-    # Construir FechEntr desde anio+Mes (no depende de una columna previa)
+    # 2) Construir FechEntr desde anio+Mes
     df["FechEntr"] = pd.to_datetime(
         df["Mes"].radd(f"{anio}-"), format="%Y-%m", errors="coerce"
     ).dt.strftime("%Y-%m-%d")
-
     if df["FechEntr"].isna().any():
         errores = df[df["FechEntr"].isna()]
         print("[ERROR-DETALLE] ❌ FechEntr inválidas detectadas en:")
@@ -110,7 +110,7 @@ def insertar_forecast_detalle(
         .to_string(index=False)
     )
 
-    # DELETE previos por clave compuesta (ForecastID + Item + Tipo + Ocr + FechEntr)
+    # 3) DELETE previos por clave compuesta (ForecastID + Item + Tipo + Ocr + FechEntr)
     tuplas_delete = [
         (forecast_id, r.ItemCode, r.TipoForecast, r.OcrCode3, r.FechEntr)
         for r in df.itertuples()
@@ -129,39 +129,7 @@ def insertar_forecast_detalle(
         db_path=db_path,
     )
 
-    # INSERT nuevos
-    tuplas_insert = [
-        (
-            forecast_id,
-            row["CardCode"],
-            row["ItemCode"],
-            row["FechEntr"],
-            row["TipoForecast"],
-            row["OcrCode3"],
-            row["Linea"],
-            row["Cant"],
-            row["PrecioUN"],
-            row["DocCur"],
-            row["SlpCode"],
-        )
-        for _, row in df.iterrows()
-    ]
-
-    _run_forecast_write(
-        """
-        INSERT INTO Forecast_Detalle (
-            ForecastID, CardCode, ItemCode, FechEntr,
-            TipoForecast, OcrCode3, Linea, Cant,
-            PrecioUN, DocCur, SlpCode
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        tuplas_insert,
-        many=True,
-        db_path=db_path,
-    )
-
-    # 2️⃣ INSERT nuevos
+    # 4) INSERT nuevos (UN SOLO INSERT)
     tuplas_insert = [
         (
             forecast_id,

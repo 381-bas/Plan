@@ -64,6 +64,14 @@ def hash_df(df: pd.DataFrame) -> int:
 # B_VFO001: Editor visual controlado y selección de cliente para forecast editable
 # # ∂B_VFO001/∂B0
 def vista_forecast(slpcode, cardcode):
+    # Agregar al inicio de la función
+    print(
+        f"[DEBUG-VISTA-INIT] Iniciando vista_forecast - slpcode: {slpcode}, cardcode: {cardcode}"
+    )
+    print(
+        f"[DEBUG-VISTA-INIT] Estado session_state keys: {list(st.session_state.keys())}"
+    )
+
     # 1️⃣  ─────────────────────  HEADER UI  ─────────────────────
     st.markdown(
         """
@@ -249,11 +257,31 @@ def vista_forecast(slpcode, cardcode):
     else:
         if st.button("💾 Guardar forecast en base de datos"):
             try:
+                print(
+                    f"[DEBUG-SAVE] Iniciando proceso de guardado para cliente {cardcode}"
+                )
+                print(
+                    f"[DEBUG-SAVE] Estado de clientes_editados antes: {st.session_state.get('clientes_editados', set())}"
+                )
+
                 sincronizar_para_guardado_final(
                     key_buffer=key_buffer, df_editado=df_editado
                 )
+                print(
+                    f"[DEBUG-SAVE] Buffer sincronizado para guardado. Key: {key_buffer}"
+                )
+                print(
+                    f"[DEBUG-SAVE] Tamaño del DataFrame a guardar: {df_editado.shape}"
+                )
+
                 guardar_todos_los_clientes_editados(anio, DB_PATH)
+                print("[DEBUG-SAVE] Guardado completado")
+                print(
+                    f"[DEBUG-SAVE] Estado de clientes_editados después: {st.session_state.get('clientes_editados', set())}"
+                )
+
             except Exception as e:
+                print(f"[ERROR-SAVE] Error durante el guardado: {str(e)}")
                 st.error(f"❌ Error durante el guardado: {e}")
 
 
@@ -288,14 +316,41 @@ def vista_ayuda():
 # B_RUN001: Ejecutor principal de tabs en ventas.py
 # # ∂B_RUN001/∂B0
 def run():
-    slpcode = st.query_params.get("vendedor", 999)
-    try:
-        slpcode = int(slpcode)
-    except Exception as e:
-        print(f"[SYMBIOS][ventas] Error en bloque línea 275: {e}")
-        raise
+    print("[DEBUG-RUN] Iniciando función run()")
+
+    slp_qs = st.query_params.get("vendedor", None)
+    slp_ss = st.session_state.get("SlpCode", None)
+    print(f"[DEBUG-RUN] Query param vendedor: {slp_qs}")
+    print(f"[DEBUG-RUN] Session state SlpCode: {slp_ss}")
+
+    slpcode = None
+    if slp_qs not in (None, ""):
+        try:
+            slpcode = int(slp_qs)
+            print(f"[DEBUG-RUN] slpcode desde query params: {slpcode}")
+        except Exception:
+            pass
+    if slpcode is None and slp_ss is not None:
+        slpcode = int(slp_ss)
+        print(f"[DEBUG-RUN] slpcode desde session state: {slpcode}")
+
+    if slpcode is None:
+        print("[DEBUG-RUN] No se pudo obtener slpcode válido")
+        st.error("Seleccione un vendedor desde el Home.")
+        st.stop()
+
+    qp = st.query_params.to_dict()
+    print(f"[DEBUG-RUN] Query params actuales: {qp}")
+
+    if qp.get("modulo") != "ventas" or str(qp.get("vendedor")) != str(slpcode):
+        print(
+            f"[DEBUG-RUN] Actualizando query params - modulo: ventas, vendedor: {slpcode}"
+        )
+        st.query_params.update(modulo="ventas", vendedor=slpcode)
+        st.rerun()
 
     try:
+        print("[DEBUG-RUN] Iniciando creación de tabs")
         tabs = st.tabs(
             [
                 "📋 Forecast",
