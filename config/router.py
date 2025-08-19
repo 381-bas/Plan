@@ -29,11 +29,6 @@ MODULOS_DISPONIBLES = {
 }
 
 
-# --- PATCH: detector de Rerun para no mostrarlo como error
-def _is_rerun_exc(e: Exception) -> bool:
-    return e.__class__.__name__ in ("RerunException", "RerunData")
-
-
 # B_ROUT002: Función para cargar y validar módulo según nombre y permisos de rol
 # # ∂B_ROUT002/∂B0
 def cargar_modulo_si_valido(nombre_modulo: str):
@@ -53,14 +48,6 @@ def cargar_modulo_si_valido(nombre_modulo: str):
             )
             return
 
-    # --- PATCH: gating de 'ventas' sin vendedor → redirige limpio a inicio
-    if nombre_modulo == "ventas":
-        vendedor = st.query_params.get("vendedor")
-        if vendedor is None or f"{vendedor}".strip() == "":
-            st.info("Selecciona un vendedor para continuar.")
-            st.query_params.update({"modulo": "inicio"})
-            st.rerun()
-
     # 3.3 – Importación y ejecución
     try:
         mod = importlib.import_module(MODULOS_DISPONIBLES[nombre_modulo])
@@ -71,7 +58,6 @@ def cargar_modulo_si_valido(nombre_modulo: str):
                 f"❌ El módulo '{nombre_modulo}' no tiene una función `run()` definida."
             )
     except Exception as e:
-<<<<<<< HEAD
         # ── Manejo robusto de rerun de Streamlit (navegación / query_params) ──
         try:
             from streamlit.runtime.scriptrunner import RerunException, RerunData
@@ -89,9 +75,3 @@ def cargar_modulo_si_valido(nombre_modulo: str):
         )
         st.error(f"❌ Error al cargar el módulo '{safe_name}': {e}")
         st.stop()
-=======
-        # --- PATCH: no reportar Rerun como error
-        if _is_rerun_exc(e):
-            raise
-        st.error(f"❌ Error al cargar el módulo '{nombre_modulo}': {e}")
->>>>>>> 15e7611 (docs(ventas.py): comenta manejo de RerunData y notas B_ROUT001 (sin cambio de lógica))
