@@ -20,6 +20,8 @@ from utils.alertas import (
     render_alertas_forecast,
 )
 from utils.repositorio_forecast.repositorio_forecast_editor import (
+    obtener_buffer_cliente,  # ∂B
+    inicializar_buffer_cliente,  # ∂B
     validar_forecast_dataframe,  # ∂B
     sincronizar_buffer_edicion,  # ∂B
     sincronizar_buffer_local,  # ∂B
@@ -32,7 +34,6 @@ from utils.db import DB_PATH
 from modulos.ventas_facturas_snippet import mostrar_facturas
 
 
-<<<<<<< HEAD
 # ── Helper: detectar excepciones de rerun de Streamlit ───────────────
 def _es_rerun(e: Exception) -> bool:
     try:
@@ -42,74 +43,6 @@ def _es_rerun(e: Exception) -> bool:
         return isinstance(e, (RerunException, RerunData))
     except Exception:
         return False
-=======
-# --- PATCH A: Bootstrap de sesión para el editor (idempotente)
-def _ensure_session_keys(key_buffer: str, df_source=None):
-    import pandas as pd
-
-    MESES = [f"{m:02d}" for m in range(1, 13)]
-    cols_base = [
-        "ItemCode",
-        "ItemName",
-        "TipoForecast",
-        "OcrCode3",
-        "DocCur",
-        "Métrica",
-    ]
-    # MODIFICACIÓN: Cambiar el orden de los índices a ['TipoForecast', 'Métrica', 'ItemCode']
-    skeleton = pd.DataFrame(columns=cols_base + MESES).set_index(
-        ["TipoForecast", "Métrica", "ItemCode"]
-    )
-
-    print(f"[DEBUG-ENSURE] key_buffer: {key_buffer}")  # ADDED
-    print(f"[DEBUG-ENSURE] df_source is None: {df_source is None}")  # ADDED
-
-    # Crear buffer base si no existe
-    if key_buffer not in st.session_state:
-        if (
-            df_source is not None
-            and hasattr(df_source, "empty")
-            and not df_source.empty
-        ):
-            print("[DEBUG-ENSURE] df_source no es None ni está vacío")  # ADDED
-            df = df_source.copy()
-            print(f"[DEBUG-ENSURE] df_source cols: {df.columns.tolist()}")  # ADDED
-            # Garantizar meses 01..12
-            for m in MESES:
-                if m not in df.columns:
-                    df[m] = 0.0
-            # Si faltan claves mínimas, usar esqueleto
-            if not {"ItemCode", "TipoForecast", "Métrica"}.issubset(df.columns):
-                print("[DEBUG-ENSURE] Faltan claves mínimas, usando esqueleto")  # ADDED
-                st.session_state[key_buffer] = skeleton.copy()
-                print(f"[DEBUG-ENSURE] skeleton index: {skeleton.index.names}")  # ADDED
-            else:
-                print("[DEBUG-ENSURE] Claves mínimas presentes")  # ADDED
-                # MODIFICACIÓN: Cambiar el orden de los índices a ['TipoForecast', 'Métrica', 'ItemCode']
-                df = df.set_index(["TipoForecast", "Métrica", "ItemCode"])
-                print(f"[DEBUG-ENSURE] df index: {df.index.names}")  # ADDED
-                st.session_state[key_buffer] = df
-        else:
-            print(
-                "[DEBUG-ENSURE] df_source es None o está vacío, usando esqueleto"
-            )  # ADDED
-            st.session_state[key_buffer] = skeleton.copy()
-            print(f"[DEBUG-ENSURE] skeleton index: {skeleton.index.names}")  # ADDED
-
-    # Buffers derivados (siempre planos)
-    base = st.session_state[key_buffer]
-    if isinstance(base.index, pd.MultiIndex) or base.index.names != [None]:
-        base = base.reset_index()
-
-    st.session_state.setdefault(f"{key_buffer}_editado", base.copy())
-    st.session_state.setdefault(f"{key_buffer}_prev", base.copy())
-
-    # Soporte para bandera de refresco post-guardado (no obliga)
-    st.session_state.setdefault(f"__fresh_from_db__{key_buffer}", False)
-
-    # Conjunto de editados global (evita KeyError)
-    st.session_state.setdefault("clientes_editados", set())
->>>>>>> 15e7611 (docs(ventas.py): comenta manejo de RerunData y notas B_ROUT001 (sin cambio de lógica))
 
 
 # B_HDF001: Normalización profunda de DataFrame para comparación estructural
@@ -131,11 +64,7 @@ def hash_df(df: pd.DataFrame) -> int:
 # B_VFO001: Editor visual controlado y selección de cliente para forecast editable
 # # ∂B_VFO001/∂B0
 def vista_forecast(slpcode, cardcode):
-    import pandas as pd
-
-    MESES = [f"{m:02d}" for m in range(1, 13)]
-
-    # 1) Header
+    # 1️⃣  ─────────────────────  HEADER UI  ─────────────────────
     st.markdown(
         """
         <style>
@@ -143,31 +72,35 @@ def vista_forecast(slpcode, cardcode):
             .titulo-ajustado  { margin: .5rem 0 1rem; font-size: 1.2rem; font-weight: 500; }
         </style>
         <div class="titulo-ajustado">🧬 Editor Forecast Cantidad / Precio</div>
-        """,
+    """,
         unsafe_allow_html=True,
     )
 
-    # 2) Validación vendedor
+    # -----------------------------------------------------------------
+    # 2️⃣  ───────────  Validación de query-param / vendedor  ───────────
+    # (mantenemos compatibilidad con llamada directa por parámetro)
     slpcode_qs = st.query_params.get("vendedor", slpcode)
     try:
         slpcode = int(slpcode_qs)
     except Exception:
         st.error("Código de vendedor inválido")
         st.stop()
-    st.session_state.setdefault("clientes_editados", set())
 
-    # 3) Carga clientes + forecast
+    # -----------------------------------------------------------------
+    # 3️⃣  ───────────  Carga inicial de clientes y forecast  ───────────
     clientes = obtener_clientes(slpcode).sort_values("Nombre")
     if clientes.empty:
         st.info("Este vendedor no tiene clientes activos.")
         st.stop()
 
+    # NUEVO: Filtros horizontales Cliente + Producto
     col1, col2 = st.columns([2, 2])
+
     with col1:
         cardcode = st.selectbox(
             "Cliente:",
             clientes["CardCode"],
-            format_func=lambda x: f"{x} - {clientes.loc[clientes['CardCode']==x,'Nombre'].values[0]}",
+            format_func=lambda x: f"{x} - {clientes.loc[clientes['CardCode'] == x, 'Nombre'].values[0]}",
             key="cliente_selectbox",
         )
 
@@ -177,38 +110,40 @@ def vista_forecast(slpcode, cardcode):
         st.info("⚠️ Forecast vacío para este cliente/año.")
         st.stop()
 
-    # 4) Buffer de sesión
+    # Continuar después de obtener df_forecast
+    # -----------------------------------------------------------------
+    # 4️⃣  ───────────  Buffer de sesión (DataFrame completo)  ───────────
     key_buffer = f"forecast_buffer_cliente_{cardcode}"
-    _ensure_session_keys(key_buffer, df_source=df_forecast)
-    df_buffer = st.session_state[key_buffer]
-    # salida plana, por si acaso
-    if isinstance(
-        df_buffer.index, (pd.MultiIndex, pd.Index)
-    ) and df_buffer.index.names != [None]:
-        df_buffer = df_buffer.reset_index()
+    if key_buffer not in st.session_state:
+        inicializar_buffer_cliente(key_buffer, df_forecast)
 
-    # Defensas de meses
-    for m in MESES:
-        if m not in df_buffer.columns:
-            df_buffer[m] = 0.0
-
-    # Sincronizar con editado
+    df_buffer = obtener_buffer_cliente(key_buffer).reset_index()
     df_buffer = sincronizar_buffer_edicion(df_buffer, key_buffer)
-    if isinstance(
-        df_buffer.index, (pd.MultiIndex, pd.Index)
-    ) and df_buffer.index.names != [None]:
-        df_buffer = df_buffer.reset_index()
+
+    # 5️⃣  ───────────  Merge de Precios (si existe)  ───────────
+    if "PrecioUN" in df_buffer.columns:
+        precios = (
+            df_buffer[df_buffer["Métrica"] == "Precio"]
+            .groupby(["ItemCode", "TipoForecast"])["PrecioUN"]
+            .first()
+            .reset_index()
+        )
+        df_buffer = df_buffer.drop(columns=["PrecioUN"]).merge(
+            precios, on=["ItemCode", "TipoForecast"], how="left"
+        )
 
     with col2:
         itemcode_filtro = st.selectbox(
             "🔍 Filtrar producto:",
-            ["Todos"] + sorted(df_buffer["ItemCode"].astype(str).unique().tolist()),
+            ["Todos"] + sorted(df_buffer["ItemCode"].unique().tolist()),
             key=f"filtro_producto_{cardcode}",
         )
 
-    # 5) Filtro y orden
+    # -----------------------------------------------------------------
+    # 6️⃣  ───────────  Filtro de producto (UI)  ───────────
+
     df_filtrado = (
-        df_buffer[df_buffer["ItemCode"].astype(str) == str(itemcode_filtro)].copy()
+        df_buffer[df_buffer["ItemCode"] == itemcode_filtro].copy()
         if itemcode_filtro != "Todos"
         else df_buffer.copy()
     )
@@ -221,63 +156,52 @@ def vista_forecast(slpcode, cardcode):
         "DocCur",
         "Métrica",
     ]
-    extras = [c for c in df_filtrado.columns if c not in campos_fijos]
-    columnas_ordenadas = campos_fijos + extras
-
+    columnas_ordenadas = campos_fijos + [
+        c for c in df_filtrado.columns if c not in campos_fijos
+    ]
     df_filtrado = df_filtrado[columnas_ordenadas].sort_values(
         ["ItemCode", "TipoForecast", "Métrica"]
     )
 
-<<<<<<< HEAD
     # -----------------------------------------------------------------
     # 7️⃣  ───────────  Configuración del Editor (sin autosave/persist) ───────────
-=======
-    # 6) Editor
->>>>>>> 15e7611 (docs(ventas.py): comenta manejo de RerunData y notas B_ROUT001 (sin cambio de lógica))
     column_config_forecast = {
         "ItemCode": column_config.TextColumn(label="Cod"),
         "TipoForecast": column_config.TextColumn(label="Tipo"),
         "OcrCode3": column_config.TextColumn(label="Linea"),
         "DocCur": column_config.TextColumn(label="$"),
-        "Métrica": column_config.TextColumn(label="Métrica"),
     }
     for mes in range(1, 13):
         col = f"{mes:02d}"
         column_config_forecast[col] = column_config.NumberColumn(
             label=col,
-            disabled=mes <= 6,  # si aplica tu política
+            disabled=mes <= 6,  # bloqueo hasta junio
         )
 
     df_editado = st.data_editor(
         df_filtrado,
         key=f"editor_forecast_{cardcode}",
         use_container_width=True,
-<<<<<<< HEAD
         num_rows="fixed",  # "dynamic" si en el futuro habilitas agregar filas
         height=len(df_filtrado) * 35 + 40,  # ajusta si lo prefieres
-=======
-        num_rows="fixed",
-        height=len(df_filtrado) * 35 + 40 if len(df_filtrado) > 0 else 200,
->>>>>>> 15e7611 (docs(ventas.py): comenta manejo de RerunData y notas B_ROUT001 (sin cambio de lógica))
         column_order=columnas_ordenadas,
         column_config=column_config_forecast,
     )
 
-<<<<<<< HEAD
     # -----------------------------------------------------------------
     # 8️⃣  ───────────  Detección de cambios (solo staging en sesión) ───────────
-=======
-    # 7) Detección de cambios + guardado temporal/flag
->>>>>>> 15e7611 (docs(ventas.py): comenta manejo de RerunData y notas B_ROUT001 (sin cambio de lógica))
     df_actualizado, hay_cambios = sincronizar_buffer_local(df_buffer, df_editado)
+
+    print(f"[DEBUG-VISTA] Cliente actual: {cardcode}")
+    print(f"[DEBUG-VISTA] hay_cambios_real: {hay_cambios}")
 
     hash_key = f"{key_buffer}_hash"
     try:
         hash_actual = hash_df(df_actualizado.sort_index())
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR-VISTA] No se pudo calcular hash_actual: {e}")
         hash_actual = 0
 
-<<<<<<< HEAD
     if hash_key not in st.session_state:
         # Primera huella: evita marcar “cambios” al cargar por primera vez
         st.session_state[hash_key] = hash_actual
@@ -312,35 +236,6 @@ def vista_forecast(slpcode, cardcode):
 
     # -----------------------------------------------------------------
     # 🔟  ───────────  Validación final & opciones de guardado  ───────────
-=======
-    if hay_cambios or hash_actual != hash_previo:
-        # defensas de claves/meses
-        for col, default in [
-            ("ItemCode", ""),
-            ("TipoForecast", ""),
-            ("Métrica", "Cantidad"),
-        ]:
-            if col not in df_actualizado.columns:
-                df_actualizado[col] = default
-        for m in MESES:
-            if m not in df_actualizado.columns:
-                df_actualizado[m] = 0.0
-
-        st.session_state[key_buffer] = df_actualizado.set_index(
-            ["ItemCode", "TipoForecast", "Métrica"]
-        )
-        guardar_temp_local(key_buffer, df_actualizado)
-        actualizar_buffer_global(df_actualizado, key_buffer)
-
-        editados = st.session_state.get("clientes_editados", set())
-        editados.add(cardcode)
-        st.session_state["clientes_editados"] = editados
-        st.success("✅ Cambios registrados exitosamente")
-        st.session_state[hash_key] = hash_actual
-        st.rerun()
-
-    # 8) Validaciones + botón guardar
->>>>>>> 15e7611 (docs(ventas.py): comenta manejo de RerunData y notas B_ROUT001 (sin cambio de lógica))
     try:
         validar_forecast_dataframe(df_editado)
     except Exception as e:
@@ -348,6 +243,7 @@ def vista_forecast(slpcode, cardcode):
         st.stop()
 
     hay_editados = bool(st.session_state.get("clientes_editados"))
+
     if not hay_editados:
         st.button("💾 Guardar forecast en base de datos", disabled=True)
     else:
@@ -411,7 +307,6 @@ def run():
             ]
         )
 
-<<<<<<< HEAD
         with tabs[0]:
             vista_forecast(slpcode, None)
         with tabs[1]:
@@ -430,34 +325,3 @@ def run():
             raise
         st.error(f"❌ No se pudo cargar la lista de vendedores con forecast: {e}")
         st.stop()
-=======
-    with tabs[0]:
-        vista_forecast(slpcode, None)
-    with tabs[1]:
-        vista_stock(slpcode, None)
-    with tabs[2]:
-        vista_historico(slpcode, None)
-    with tabs[3]:
-        vista_ayuda()
-    with tabs[4]:
-        render_alertas_forecast(slpcode)
-    with tabs[5]:
-        mostrar_facturas()
-
-
-# Agregar esta función de diagnóstico
-def _debug_dataframe_state(df, label=""):
-    """Función auxiliar para diagnóstico completo del estado de un DataFrame"""
-    print(f"\n[DEEP-DEBUG] {label} {'='*50}")
-    print(f"Tipo de DataFrame: {type(df)}")
-    print(f"Shape: {df.shape}")
-    print(f"Columns: {df.columns.tolist()}")
-    print(f"Index type: {type(df.index)}")
-    if isinstance(df.index, pd.MultiIndex):
-        print(f"Index names: {df.index.names}")
-        print(
-            f"Index levels: {[list(df.index.get_level_values(i)) for i in range(df.index.nlevels)]}"
-        )
-    print(f"First few rows:\n{df.head()}\n")
-    print("=" * 70)
->>>>>>> 15e7611 (docs(ventas.py): comenta manejo de RerunData y notas B_ROUT001 (sin cambio de lógica))
