@@ -3,6 +3,8 @@
 import pandas as pd  # noqa: E402
 import streamlit as st
 from config.contexto import obtener_mes
+import numpy as np
+from typing import Tuple
 
 
 # B_BUF002: Generación de clave única de buffer para cliente
@@ -99,11 +101,31 @@ def inicializar_buffer_cliente(
 
 # B_BUF004: Obtención del DataFrame del buffer de cliente desde sesión
 # # ∂B_BUF004/∂B0
-def obtener_buffer_cliente(cliente: str) -> pd.DataFrame:
-    key = get_key_buffer(cliente)
-    df = st.session_state.get(key, pd.DataFrame()).copy()
-    df.columns = df.columns.astype(str)
-    return df
+# --- PATCH B: obtener_buffer_cliente seguro (opcional)
+def obtener_buffer_cliente(key_buffer: str):
+    import pandas as pd
+
+    if key_buffer not in st.session_state:
+        # Crear un esqueleto mínimo si llegaran a llamarlo sin bootstrap
+        MESES = [f"{m:02d}" for m in range(1, 13)]
+        cols_base = [
+            "ItemCode",
+            "ItemName",
+            "TipoForecast",
+            "OcrCode3",
+            "DocCur",
+            "Métrica",
+        ]
+        st.session_state[key_buffer] = pd.DataFrame(
+            columns=cols_base + MESES
+        ).set_index(["ItemCode", "TipoForecast", "Métrica"])
+        st.session_state.setdefault(
+            f"{key_buffer}_editado", st.session_state[key_buffer].copy()
+        )
+        st.session_state.setdefault(
+            f"{key_buffer}_prev", st.session_state[key_buffer].copy()
+        )
+    return st.session_state[key_buffer]
 
 
 # B_BUF005: Actualización del buffer completo desde edición del usuario
@@ -289,95 +311,131 @@ def sincronizar_buffer_edicion(
     df_buffer: pd.DataFrame, key_buffer: str
 ) -> pd.DataFrame:
     """
-    Refuerza persistencia de edición mixta:
-    - Aplica cambios históricos del buffer editado a nueva vista df_buffer
-    - Usa combinación única (ItemCode, TipoForecast, Métrica, OcrCode3) como clave de actualización
+    Mezcla el estado editado (session_state[key_buffer+'_editado']) dentro del buffer activo.
+    - Entrada y salida SIEMPRE planas (claves como columnas, no en índice)
+    - Claves y meses 01..12 garantizados
+    - Merge tolerante a tipos (numérico para meses)
     """
+    import numpy as np
+
+    KEYS = ["ItemCode", "TipoForecast", "Métrica", "OcrCode3"]
+    MESES = [f"{m:02d}" for m in range(1, 13)]
     key_state = f"{key_buffer}_editado"
+
+    print("\n[SYNC-DEBUG] ============= INICIO SINCRONIZACIÓN =============")
+    print(f"[SYNC-DEBUG] Shape buffer (in): {df_buffer.shape}")
+    print(f"[SYNC-DEBUG] Cols buffer (in): {df_buffer.columns.tolist()}")
+    print(f"[SYNC-DEBUG] Index buffer (in): {getattr(df_buffer.index, 'names', None)}")
+
+    # --- 0) Entradas siempre planas ---
+    if isinstance(
+        df_buffer.index, (pd.MultiIndex, pd.Index)
+    ) and df_buffer.index.names != [None]:
+        df_buffer = df_buffer.reset_index()
+        print(f"[SYNC-DEBUG] Buffer reset_index → cols: {df_buffer.columns.tolist()}")
+
     if key_state not in st.session_state:
-        return df_buffer
+        print("[SYNC-DEBUG] No existe estado editado previo; retorno buffer plano.")
+        # Salida plana garantizada
+        return df_buffer.copy()
 
     df_editado = st.session_state[key_state]
+    print(f"[SYNC-DEBUG] Shape editado (raw): {getattr(df_editado, 'shape', None)}")
+    if isinstance(
+        df_editado.index, (pd.MultiIndex, pd.Index)
+    ) and df_editado.index.names != [None]:
+        df_editado = df_editado.reset_index()
+        print(f"[SYNC-DEBUG] Editado reset_index → cols: {df_editado.columns.tolist()}")
 
-    # 🧠 NUEVO BLOQUE PARA CORTAR LOOP
-    if hash_semantico(df_editado) == hash_semantico(df_buffer):
+    # --- 1) Garantizar claves en editado (si faltan, tomar de buffer o defaults) ---
+    for k, default in [
+        ("ItemCode", ""),
+        ("TipoForecast", ""),
+        ("Métrica", "Cantidad"),
+        ("OcrCode3", ""),
+    ]:
+        if k not in df_editado.columns:
+            if k in df_buffer.columns and len(df_buffer) == len(df_editado):
+                df_editado[k] = df_buffer[k].values
+                print(
+                    f"[SYNC-DEBUG] Relleno editado.{k} desde buffer ({len(df_editado)} vals)."
+                )
+            else:
+                df_editado[k] = default
+                print(f"[SYNC-DEBUG] Relleno editado.{k} con default='{default}'.")
+
+    # --- 2) Garantizar meses en editado (si falta alguno, tomar de buffer o 0.0) ---
+    for m in MESES:
+        if m not in df_editado.columns:
+            if m in df_buffer.columns and len(df_buffer) == len(df_editado):
+                df_editado[m] = df_buffer[m].values
+                print(f"[SYNC-DEBUG] Relleno mes {m} desde buffer.")
+            else:
+                df_editado[m] = 0.0
+                print(f"[SYNC-DEBUG] Relleno mes {m} con 0.0 (default).")
+
+    # --- 3) Validación mínima de esquema ---
+    falt_buf = [c for c in KEYS if c not in df_buffer.columns]
+    if falt_buf:
         print(
-            f"🛑 [SCANNER] Sincronización evitada: edición idéntica para {key_buffer}"
+            f"[SYNC-DEBUG] Buffer carece de claves {falt_buf}; intentando sanear desde editado/defaults."
         )
-        return df_buffer
+        for k in falt_buf:
+            df_buffer[k] = (
+                df_editado[k].values
+                if k in df_editado.columns and len(df_editado) == len(df_buffer)
+                else ""
+            )
+    falt_edi = [c for c in KEYS if c not in df_editado.columns]
+    if falt_edi:
+        raise ValueError(f"Faltan claves requeridas en editado: {falt_edi}")
 
-    columnas_clave = ["ItemCode", "TipoForecast", "Métrica", "OcrCode3"]
-    # ✅ Validar unicidad de clave compuesta antes de indexar
-    if df_editado.duplicated(subset=columnas_clave).any():
-        print("[?? DEBUG-SYNC] df_editado tiene claves duplicadas ? update() fallar�")
-        print(
-            df_editado[
-                df_editado.duplicated(subset=columnas_clave, keep=False)
-            ].sort_values(columnas_clave)
-        )
-        raise ValueError(
-            "Claves duplicadas detectadas en df_editado. No se puede sincronizar con update()"
-        )
+    # --- 4) Preparar índices y alinear universo de filas ---
+    buf_idx = df_buffer.set_index(KEYS).sort_index()
+    edi_idx = df_editado.set_index(KEYS).sort_index()
+    idx_union = buf_idx.index.union(edi_idx.index)
+    buf_idx = buf_idx.reindex(idx_union).sort_index()
+    edi_idx = edi_idx.reindex(idx_union).sort_index()
 
-    columnas_mes = [f"{i:02d}" for i in range(1, 13)]
+    # --- 5) Comparación y normalización numérica de meses ---
+    buf_num = buf_idx[MESES].apply(pd.to_numeric, errors="coerce")
+    edi_num = edi_idx[MESES].apply(pd.to_numeric, errors="coerce")
 
-    # 🔒 Filtrar columnas prohibidas
-    columnas_prohibidas = ["PrecioUN", "_PrecioUN_", "PrecioUnitario"]
-    df_editado = df_editado.drop(
-        columns=[c for c in columnas_prohibidas if c in df_editado.columns],
-        errors="ignore",
+    diff_array = ~np.isclose(buf_num.values, edi_num.values, atol=1e-6, equal_nan=True)
+    hay_cambios = bool(diff_array.sum() > 0)
+    print(f"[SYNC-DEBUG] ¿Hay cambios en meses?: {hay_cambios}")
+
+    # Normalizar buffer a numérico antes de update
+    buf_idx[MESES] = buf_num
+
+    if hay_cambios:
+        buf_idx.update(edi_num)
+        print("[SYNC-DEBUG] Aplicados cambios numéricos en meses.")
+
+    # --- 6) Columnas extra (no mes / no clave): prioriza editado sobre buffer ---
+    extras = [
+        c
+        for c in set(df_buffer.columns).union(df_editado.columns)
+        if c not in KEYS and c not in MESES
+    ]
+    if extras:
+        buf_idx[extras] = df_buffer.set_index(KEYS)[extras].reindex(buf_idx.index)
+        edi_extra = df_editado.set_index(KEYS)[extras].reindex(buf_idx.index)
+        buf_idx.update(edi_extra)
+        print(f"[SYNC-DEBUG] Extras fusionados: {extras}")
+
+    # --- 7) Salida plana garantizada + orden razonable ---
+    df_final = buf_idx.reset_index()
+    # Orden: claves + extras + meses (la vista luego reordena si quiere)
+    ordered_cols = KEYS + extras + MESES
+    df_final = df_final.reindex(
+        columns=[c for c in ordered_cols if c in df_final.columns]
     )
 
-    # 🔍 Validar columnas mensuales
-    faltantes = [col for col in columnas_mes if col not in df_editado.columns]
-    if faltantes:
-        raise ValueError(
-            f"El buffer editado carece de columnas mensuales requeridas: {faltantes}"
-        )
+    print(f"[SYNC-DEBUG] Shape buffer (out): {df_final.shape}")
+    print(f"[SYNC-DEBUG] Cols buffer (out): {df_final.columns.tolist()}")
 
-    df_actualizado = df_buffer.copy()
-
-    try:
-        df_actualizado = df_actualizado.set_index(columnas_clave)
-        df_editado = df_editado.set_index(columnas_clave)
-
-        # 🧪 Validar cobertura de claves
-        claves_faltantes = set(df_actualizado.index) - set(df_editado.index)
-        if claves_faltantes:
-            print(
-                f"⚠️ Advertencia: {len(claves_faltantes)} combinaciones clave no fueron editadas."
-            )
-
-        # 🛑 Ordenar índices para evitar PerformanceWarning
-        df_actualizado = df_actualizado.sort_index()
-        df_editado = df_editado.sort_index()
-
-        # 🧠 Evitar update si no hay diferencias
-        try:
-            iguales = df_actualizado[columnas_mes].equals(df_editado[columnas_mes])
-        except Exception as e:
-            print(f"[⚠️ COMPARACIÓN FALLIDA] {e}")
-            iguales = False
-
-        if not iguales:
-            df_actualizado.update(df_editado[columnas_mes])
-
-        # ✅ Restaurar columnas adicionales que no fueron tocadas por edición
-        columnas_extra = [
-            col
-            for col in df_buffer.columns
-            if col not in df_actualizado.reset_index().columns
-        ]
-        for col in columnas_extra:
-            df_actualizado[col] = df_buffer.set_index(columnas_clave)[col]
-
-        df_actualizado = df_actualizado.reset_index()
-
-    except Exception as e:
-        print(f"[ERROR] No se pudo sincronizar buffer editado: {e}")
-        return df_buffer
-
-    return df_actualizado
+    return df_final
 
 
 # B_SYN002: Actualización simbólica y persistente del buffer editado en sesión global
@@ -415,8 +473,6 @@ def actualizar_buffer_global(df_editado: pd.DataFrame, key_buffer: str):
 
 # B_SYN003: Fusión estructural del buffer activo con edición parcial visual
 # # ∂B_SYN003/∂B0
-from typing import Tuple  # noqa: E402
-import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 
@@ -427,45 +483,58 @@ def sincronizar_buffer_local(
     Fusiona los cambios del editor con el buffer activo y
     devuelve (df_final, hay_cambios).
     """
-    columnas_clave = ["ItemCode", "TipoForecast", "Métrica", "OcrCode3"]
+    # --- PRELUDIO: Normalización de entrada (siempre columnas, nunca índices) ---
+    MESES = [f"{m:02d}" for m in range(1, 13)]
 
-    # ── Detectar dinámicamente las columnas-mes ──────────────────────────────
-    columnas_mes = sorted(
-        [c for c in df_editado.columns if c.isdigit() and len(c) <= 2],
-        key=lambda x: int(x),
-    )
+    df_b = df_buffer.copy()
+    df_e = df_editado.copy()
+
+    if "ItemCode" not in df_b.columns:
+        df_b = df_b.reset_index()
+    if "ItemCode" not in df_e.columns:
+        df_e = df_e.reset_index()
+
+    for k, default in [("ItemCode", ""), ("TipoForecast", ""), ("Métrica", "Cantidad")]:
+        if k not in df_e.columns:
+            if k in df_b.columns and len(df_b) == len(df_e):
+                df_e[k] = df_b[k].values
+            else:
+                df_e[k] = default
+
+    for m in MESES:
+        if m not in df_e.columns:
+            df_e[m] = df_b[m] if m in df_b.columns and len(df_b) == len(df_e) else 0.0
+
+    df_buffer = df_b
+    df_editado = df_e
+
+    columnas_clave = ["ItemCode", "TipoForecast", "Métrica", "OcrCode3"]
+    columnas_mes = MESES[:]  # ✅ estable
+
     columnas_req = columnas_clave + columnas_mes
 
     print("[DEBUG-SYNC] Iniciando sincronización para forecast_buffer")
     print(f"[DEBUG-SYNC] Tamaño DF editado recibido: {df_editado.shape}")
     print(f"[DEBUG-SYNC] Buffer base recuperado:  {df_buffer.shape}")
 
-    # ── Validación mínima de esquema ────────────────────────────────────────
     faltantes = set(columnas_req) - set(df_editado.columns)
     if faltantes:
         raise ValueError(
             f"El DataFrame editado carece de columnas requeridas: {faltantes}"
         )
 
-    # ── Índices normalizados ────────────────────────────────────────────────
-    buf_idx = df_buffer.set_index(columnas_clave)
-    edi_idx = df_editado.set_index(columnas_clave)
+    buf_idx = df_buffer.set_index(columnas_clave).sort_index()
+    edi_idx = df_editado.set_index(columnas_clave).sort_index()
 
-    # Ordenarlos una única vez: evita PerformanceWarning y acelera update()
-    buf_idx = buf_idx.sort_index()
-    edi_idx = edi_idx.sort_index()
-
-    # Unir índices para contemplar filas nuevas/eliminadas
     idx_union = buf_idx.index.union(edi_idx.index)
-
-    # IMPORTANTÍSIMO: reindex devuelve vistas DESORDENADAS → volvemos a ordenar
     buf_idx = buf_idx.reindex(idx_union).sort_index()
     edi_idx = edi_idx.reindex(idx_union).sort_index()
 
-    # ── Comparación de celdas (tolerante a float/NaN) ───────────────────────
-    diff_array = ~np.isclose(
-        buf_idx[columnas_mes], edi_idx[columnas_mes], atol=1e-6, equal_nan=True
-    )
+    # ✅ Comparación robusta a tipos
+    buf_num = buf_idx[columnas_mes].apply(pd.to_numeric, errors="coerce")
+    edi_num = edi_idx[columnas_mes].apply(pd.to_numeric, errors="coerce")
+
+    diff_array = ~np.isclose(buf_num.values, edi_num.values, atol=1e-6, equal_nan=True)
     dif_mask = pd.DataFrame(diff_array, index=buf_idx.index, columns=columnas_mes)
 
     total_diff = int(dif_mask.values.sum())
@@ -478,48 +547,53 @@ def sincronizar_buffer_local(
         cols_mod = dif_mask.any().pipe(lambda s: s[s].index.tolist())
         print(f"[DEBUG-SYNC] Columnas mensuales modificadas: {cols_mod}")
 
-        # Aplicar cambios
-        buf_idx.update(edi_idx[columnas_mes])
+        # Normaliza a numérico el buffer antes de aplicar cambios
+        buf_idx[columnas_mes] = buf_num
 
-        # Filas completamente nuevas
+        # Aplicar cambios desde el editor (numérico)
+        buf_idx.update(edi_num)
+
         filas_nuevas = dif_mask.index[dif_mask.all(axis=1)]
         if len(filas_nuevas):
             print(f"[DEBUG-SYNC] Filas nuevas detectadas: {len(filas_nuevas)}")
-            buf_idx.loc[filas_nuevas, columnas_mes] = edi_idx.loc[
+            buf_idx.loc[filas_nuevas, columnas_mes] = edi_num.loc[
                 filas_nuevas, columnas_mes
             ]
     else:
         print("[DEBUG-SYNC] No se detectaron diferencias reales.")
 
-    # ── Reconstrucción final con columnas extra ─────────────────────────────
-    #    Calculamos todas las columnas NO-mes ni clave presentes en
-    #    buffer o editado (ItemName, DocCur, etc.)
     cols_extra_union = [
         c
         for c in set(df_buffer.columns).union(df_editado.columns)
         if c not in columnas_clave and c not in columnas_mes
     ]
 
-    #   Restaura esos campos priorizando datos de df_editado
     if cols_extra_union:
-        # a) Start with values from buffer (may include NaN)
         buf_idx[cols_extra_union] = df_buffer.set_index(columnas_clave)[
             cols_extra_union
         ].reindex(buf_idx.index)
-        # b) Update with non-NaN coming from editado
         edi_extra = df_editado.set_index(columnas_clave)[cols_extra_union].reindex(
             buf_idx.index
         )
         buf_idx.update(edi_extra)
 
-    #   Ensamblamos el DataFrame final
     df_final = buf_idx.reset_index().reindex(columns=columnas_req + cols_extra_union)
 
-    #   Aplicar dtypes solo a columnas presentes
     dtype_map = {c: t for c, t in df_buffer.dtypes.items() if c in df_final.columns}
     df_final = df_final.astype(dtype_map, errors="ignore")
 
     print(f"[DEBUG-SYNC] Buffer final preparado. Filas: {len(df_final)}")
     print(f"[DEBUG-SYNC] Columnas finales: {list(df_final.columns)}")
+
+    # --- POSTLUDIO: salida plana garantizada ---
+    if isinstance(df_final.index, pd.MultiIndex) or df_final.index.name is not None:
+        df_final = df_final.reset_index()
+
+    for k, default in [("ItemCode", ""), ("TipoForecast", ""), ("Métrica", "Cantidad")]:
+        if k not in df_final.columns:
+            df_final[k] = default
+    for m in MESES:
+        if m not in df_final.columns:
+            df_final[m] = 0.0
 
     return df_final, hay_cambios
