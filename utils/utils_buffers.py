@@ -18,18 +18,24 @@ from services.forecast_engine import (
 )
 from services.sync import guardar_temp_local  # ∂B49
 from config.contexto import obtener_slpcode
+from utils.repositorio_forecast.forecast_writer import (
+    validate_delta_schema,
+    existe_forecast_individual,
+)
 
 
 # B_SYN002: Sincronización y guardado individual de buffer editado para cliente
 # # ∂B_SYN002/∂B0
 def sincronizar_para_guardado_final(key_buffer: str, df_editado: pd.DataFrame):
-    print(f"[DEBUG-SYNC-FINAL] 🎯 Inicio sincronización - Buffer: {key_buffer}")
-    print(f"[DEBUG-SYNC-FINAL] DataFrame inicial - Shape: {df_editado.shape}")
+    print(f"🎯 [SYNC-FINAL-START] Inicio sincronización final - Buffer: {key_buffer}")
+    print(f"📊 [SYNC-FINAL-INFO] DataFrame inicial shape: {df_editado.shape}")
+    print(f"📋 [SYNC-FINAL-INFO] Columnas iniciales: {list(df_editado.columns)}")
     print(
-        f"[DEBUG-SYNC-FINAL] Estado session_state pre-sync: {list(st.session_state.keys())}"
+        f"🔍 [SYNC-FINAL-INFO] Estado session_state pre-sync: {list(st.session_state.keys())}"
     )
 
     # 🔀 1) Unificación de métricas Cantidad + Precio
+    print("🔄 [SYNC-FINAL-STEP] Unificando métricas Cantidad + Precio...")
     df_editado_unificado = pd.concat(
         [
             df_editado[df_editado["Métrica"] == "Cantidad"],
@@ -37,108 +43,97 @@ def sincronizar_para_guardado_final(key_buffer: str, df_editado: pd.DataFrame):
         ],
         ignore_index=True,
     )
-    print(f"[DEBUG-SYNC] Total filas tras unificación: {len(df_editado_unificado)}")
     print(
-        f"[DEBUG-SYNC] Unificados: {df_editado_unificado['Métrica'].value_counts().to_dict()}"
+        f"📈 [SYNC-FINAL-INFO] Total filas tras unificación: {len(df_editado_unificado)}"
     )
+    metricas_count = df_editado_unificado["Métrica"].value_counts().to_dict()
+    print(f"📊 [SYNC-FINAL-INFO] Distribución métricas: {metricas_count}")
 
     # 🔄 2) Recuperar buffer actual
+    print(f"📂 [SYNC-FINAL-STEP] Recuperando buffer actual: {key_buffer}")
     df_base_actual = obtener_buffer_cliente(key_buffer).reset_index()
-    print(f"[DEBUG-SYNC] Buffer base recuperado: {df_base_actual.shape}")
+    print(f"📊 [SYNC-FINAL-INFO] Buffer base recuperado shape: {df_base_actual.shape}")
+    print(f"📋 [SYNC-FINAL-INFO] Columnas buffer base: {list(df_base_actual.columns)}")
 
     # 🔄 3) Sincronizar (ahora devuelve tupla)
+    print("🔄 [SYNC-FINAL-STEP] Ejecutando sincronización buffer local...")
     df_sync, hay_cambios = sincronizar_buffer_local(
         df_base_actual, df_editado_unificado
     )
+    print(f"📊 [SYNC-FINAL-INFO] Resultado sincronización - Hay cambios: {hay_cambios}")
+    print(f"📈 [SYNC-FINAL-INFO] DataFrame sincronizado shape: {df_sync.shape}")
 
     if not hay_cambios:
-        print("[DEBUG-SYNC] 🟡 Sin cambios reales -> se omite guardado final.")
+        print("✅ [SYNC-FINAL-SKIP] Sin cambios reales -> se omite guardado final.")
         return df_base_actual  # ⬅️  nada más que hacer
 
     # ---------------------------------------------------------------------
     # 🔽 Solo se ejecuta esta parte si hay_cambios == True
     # ---------------------------------------------------------------------
-    print("[DEBUG-SYNC] Columnas luego de sincronizar:", df_sync.columns.tolist())
-    print("[DEBUG-SYNC] Index cardinalidad post-sync:")
-    print(df_sync[["ItemCode", "TipoForecast", "Métrica"]].nunique())
+    print("🚀 [SYNC-FINAL-CHANGES] Procesando cambios detectados...")
+    print(
+        f"📋 [SYNC-FINAL-INFO] Columnas post-sincronización: {df_sync.columns.tolist()}"
+    )
 
+    print("🔍 [SYNC-FINAL-STEP] Analizando cardinalidad de índices...")
+    index_stats = df_sync[["ItemCode", "TipoForecast", "Métrica"]].nunique()
+    print("📊 [SYNC-FINAL-STATS] Cardinalidad post-sync:")
+    print(f"   - ItemCode: {index_stats['ItemCode']}")
+    print(f"   - TipoForecast: {index_stats['TipoForecast']}")
+    print(f"   - Métrica: {index_stats['Métrica']}")
+
+    # Validación de nulos en columnas clave
+    print("🔍 [SYNC-FINAL-STEP] Validando nulos en columnas clave...")
+    nulos_detectados = False
     for col in ["ItemCode", "TipoForecast", "Métrica"]:
-        if df_sync[col].isna().any():
-            print(f"[⚠️ SYNC] Valores nulos detectados en columna clave: {col}")
+        nulos_count = df_sync[col].isna().sum()
+        if nulos_count > 0:
+            print(
+                f"⚠️  [SYNC-FINAL-WARN] Valores nulos detectados en {col}: {nulos_count}"
+            )
+            nulos_detectados = True
+    if not nulos_detectados:
+        print("✅ [SYNC-FINAL-INFO] Sin nulos en columnas clave")
 
     # 👉 Guardar en session_state ordenado por índice compuesto
+    print("💾 [SYNC-FINAL-STEP] Guardando en session_state...")
     df_sync = df_sync.set_index(["ItemCode", "TipoForecast", "Métrica"])
     df_sync = df_sync.sort_index()
     st.session_state[key_buffer] = df_sync
+    print(f"✅ [SYNC-FINAL-INFO] Buffer guardado en session_state: {key_buffer}")
 
     df_guardar = df_sync.reset_index()
-    print(
-        f"[DEBUG-SYNC] Buffer final preparado para guardado. Filas: {len(df_guardar)}"
-    )
-    print("[DEBUG-SYNC] Columnas finales:", df_guardar.columns.tolist())
+    print(f"📊 [SYNC-FINAL-INFO] Buffer final para guardado - Filas: {len(df_guardar)}")
+    print(f"📋 [SYNC-FINAL-INFO] Columnas finales: {df_guardar.columns.tolist()}")
 
+    # Guardado temporal local
+    print("💾 [SYNC-FINAL-STEP] Guardando temporal local...")
     guardar_temp_local(key_buffer, df_guardar)
+    print("✅ [SYNC-FINAL-INFO] Guardado temporal completado")
+
+    # Actualización buffer global
+    print("🌐 [SYNC-FINAL-STEP] Actualizando buffer global...")
     actualizar_buffer_global(df_guardar, key_buffer)
+    print("✅ [SYNC-FINAL-INFO] Buffer global actualizado")
 
     # ✅ Marcar cliente como editado
     cliente = key_buffer.replace("forecast_buffer_cliente_", "")
     editados = st.session_state.get("clientes_editados", set())
     editados.add(cliente)
     st.session_state["clientes_editados"] = editados
-    print(f"[DEBUG-SYNC] Cliente marcado como editado: {cliente}")
+    print(f"🏷️  [SYNC-FINAL-INFO] Cliente marcado como editado: {cliente}")
+    print(f"📋 [SYNC-FINAL-INFO] Clientes editados actuales: {len(editados)}")
 
     # Nuevos logs de depuración
-    print(f"[DEBUG-SAVE-SYNC] Estado de sincronización - key_buffer: {key_buffer}")
-    print(
-        f"[DEBUG-SAVE-SYNC] Hash del DataFrame antes de sincronizar: {hash(str(df_editado.values.tobytes()))}"
-    )
-    print("[DEBUG-SAVE-SYNC] Verificando si ya existe una sincronización en progreso")
+    print("🔍 [SYNC-FINAL-DEBUG] Información de depuración adicional:")
+    print(f"   - Hash DataFrame pre-sync: {hash(str(df_editado.values.tobytes()))}")
+    print(f"   - Key buffer: {key_buffer}")
+    print("   - Verificando sincronización en progreso...")
+
+    print("🎉 [SYNC-FINAL-END] Sincronización final completada exitosamente")
+    print(f"📊 [SYNC-FINAL-RESULT] DataFrame resultante shape: {df_guardar.shape}")
 
     return df_guardar
-
-
-# ---------------------------------------------------------------------------
-# Helper: obtener el último ForecastID vigente para un cliente/año/vendedor
-# ---------------------------------------------------------------------------
-def _get_last_id(slpcode: int, cardcode: str, anio: int, db_path: str) -> Optional[int]:
-    """
-    Devuelve el MAX(ForecastID) **anterior** al que se está creando.
-    Si no existe uno individual por cliente-vendedor, intenta recuperar uno base global
-    donde el cliente haya participado (cualquier vendedor).
-    """
-    # 🟢 Intento 1: Forecast individual cliente + vendedor
-    qry_individual = """
-        SELECT MAX(ForecastID) AS id              
-        FROM   Forecast_Detalle
-        WHERE  SlpCode  = ?
-          AND  CardCode = ?
-          AND  strftime('%Y', FechEntr) = ?;
-    """
-    df = run_query(
-        qry_individual, params=(slpcode, cardcode, str(anio)), db_path=db_path
-    )
-
-    if not df.empty and pd.notna(df.iloc[0].id):
-        forecast_id = int(df.iloc[0].id)
-        print(f"[DEBUG-ID] ForecastID individual encontrado: {forecast_id}")
-        return forecast_id
-
-    # 🟡 Intento 2: Forecast base global por cliente (sin importar SlpCode)
-    qry_global = """
-        SELECT MAX(ForecastID) AS id              
-        FROM   Forecast_Detalle
-        WHERE  CardCode = ?
-          AND  strftime('%Y', FechEntr) = ?;
-    """
-    df_global = run_query(qry_global, params=(cardcode, str(anio)), db_path=db_path)
-
-    if not df_global.empty and pd.notna(df_global.iloc[0].id):
-        forecast_id = int(df_global.iloc[0].id)
-        print(f"[🟡 DEBUG-ID] Fallback a ForecastID base global: {forecast_id}")
-        return forecast_id
-
-    print("[⚠️ DEBUG-ID] Sin ForecastID previo (ni individual ni global)")
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -154,20 +149,49 @@ def _enriquecer_y_filtrar(
     anio: int,
     db_path: str,
     resolver_duplicados: str = "mean",  # opciones: "mean", "sum", "error"
-    incluir_deltas_cero_si_es_individual: bool = False,
+    incluir_deltas_cero_si_es_individual: bool = False,  # DEPRECADO: se ignora
 ) -> pd.DataFrame:
-    """Añade columna ``Cant_Anterior`` y filtra filas donde la cantidad cambió."""
+    """
+    Añade columna ``Cant_Anterior`` y devuelve SOLO las filas a persistir,
+    siguiendo reglas idempotentes:
+
+      (A) Δ != 0                                -> cambios reales
+      (B) Cant == 0  y Cant_Anterior > 0        -> BAJA (>0→0)
+      (C) Cant > 0   y Cant_Anterior == 0       -> ALTA (0→>0)
+
+    Notas:
+    - `incluir_deltas_cero_si_es_individual` está DEPRECADO y no se usa.
+    - Normaliza Mes a '01'..'12'.
+    - Si hay duplicados en histórico, se resuelven según `resolver_duplicados`.
+    - Propaga 'CardCode' si viene en df_largo para validar unicidad de salida.
+    """
+
+    # ---------------------------
+    # 0) Normalización de entrada
+    # ---------------------------
+    # Asegurar Mes como texto '01'..'12'
+    if "Mes" in df_largo.columns:
+        df_largo = df_largo.copy()
+        df_largo["Mes"] = df_largo["Mes"].astype(str).str.zfill(2)
+
+    # Asegurar numérico
+    for col in ("Cant",):
+        if col in df_largo.columns:
+            df_largo[col] = pd.to_numeric(df_largo[col], errors="coerce").fillna(0.0)
 
     print(
         f"[DEBUG-FILTRO] ▶ Enriqueciendo forecast cliente {cardcode} con histórico ForecastID={forecast_id_prev}"
     )
 
+    # ------------------------------------
+    # 1) Recuperar histórico (Cant_Anterior)
+    # ------------------------------------
     if forecast_id_prev is None:
         print(
             "[DEBUG-FILTRO] 🆕 Cliente sin historial previo. Se parte desde Cant_Anterior = 0"
         )
         df_prev = df_largo[["ItemCode", "TipoForecast", "OcrCode3", "Mes"]].copy()
-        df_prev["Cant_Anterior"] = 0
+        df_prev["Cant_Anterior"] = 0.0
     else:
         print(
             f"[DEBUG-FILTRO] 🔁 Cliente con historial previo. ForecastID utilizado: {forecast_id_prev}"
@@ -180,43 +204,55 @@ def _enriquecer_y_filtrar(
             WHERE  ForecastID = ?
         """
         df_prev = run_query(qry_prev, params=(forecast_id_prev,), db_path=db_path)
-        df_prev["Mes"] = df_prev["Mes"].astype(str).str.zfill(2)
-        print(f"[DEBUG-FILTRO] Registros históricos recuperados: {len(df_prev)}")
-
-        claves = ["ItemCode", "TipoForecast", "OcrCode3", "Mes"]
-        duplicados = df_prev.duplicated(subset=claves, keep=False)
-        if duplicados.any():
+        if df_prev.empty:
             print(
-                f"[⚠️ DEBUG-FILTRO] {duplicados.sum()} duplicados detectados en histórico por clave compuesta."
+                "[DEBUG-FILTRO] ⚠️ Histórico vacío para el ForecastID indicado. Cant_Anterior=0."
             )
-            if resolver_duplicados == "error":
-                raise ValueError(
-                    "Duplicados en histórico de Forecast_Detalle y resolver_duplicados='error'"
-                )
-            elif resolver_duplicados in {"mean", "sum"}:
+            df_prev = df_largo[["ItemCode", "TipoForecast", "OcrCode3", "Mes"]].copy()
+            df_prev["Cant_Anterior"] = 0.0
+        else:
+            df_prev["Mes"] = df_prev["Mes"].astype(str).str.zfill(2)
+            df_prev["Cant_Anterior"] = pd.to_numeric(
+                df_prev["Cant_Anterior"], errors="coerce"
+            ).fillna(0.0)
+            print(f"[DEBUG-FILTRO] Registros históricos recuperados: {len(df_prev)}")
+
+            claves = ["ItemCode", "TipoForecast", "OcrCode3", "Mes"]
+            duplicados = df_prev.duplicated(subset=claves, keep=False)
+            if duplicados.any():
                 print(
-                    f"[DEBUG-FILTRO] Resolviendo con agregación '{resolver_duplicados}' sobre Cant_Anterior"
+                    f"[⚠️ DEBUG-FILTRO] {duplicados.sum()} duplicados detectados en histórico por clave compuesta."
                 )
-                df_prev = df_prev.groupby(claves, as_index=False).agg(
-                    {"Cant_Anterior": resolver_duplicados}
-                )
-            else:
-                raise ValueError(
-                    f"Valor no válido en resolver_duplicados: {resolver_duplicados}"
-                )
+                if resolver_duplicados == "error":
+                    raise ValueError(
+                        "Duplicados en histórico de Forecast_Detalle y resolver_duplicados='error'"
+                    )
+                elif resolver_duplicados in {"mean", "sum"}:
+                    print(
+                        f"[DEBUG-FILTRO] Resolviendo con agregación '{resolver_duplicados}' sobre Cant_Anterior"
+                    )
+                    df_prev = df_prev.groupby(claves, as_index=False).agg(
+                        {"Cant_Anterior": resolver_duplicados}
+                    )
+                else:
+                    raise ValueError(
+                        f"Valor no válido en resolver_duplicados: {resolver_duplicados}"
+                    )
 
-    claves = ["ItemCode", "TipoForecast", "OcrCode3", "Mes"]
-    df_enr = df_largo.merge(df_prev, on=claves, how="left")
-    df_enr["Cant_Anterior"] = df_enr["Cant_Anterior"].fillna(0)
+    # --------------------------------
+    # 2) Merge y cálculo de diagnóstico
+    # --------------------------------
+    claves_merge = ["ItemCode", "TipoForecast", "OcrCode3", "Mes"]
+    df_enr = df_largo.merge(df_prev, on=claves_merge, how="left")
+    df_enr["Cant_Anterior"] = df_enr["Cant_Anterior"].fillna(0.0)
 
-    faltantes = df_enr[df_enr["Cant_Anterior"].isna()]
-    if not faltantes.empty:
-        print(
-            f"[⚠️ DEBUG-FILTRO] {len(faltantes)} registros no encontraron Cant_Anterior. ¿Faltan claves en histórico?"
-        )
+    # Propagar CardCode (si está en df_largo) para validar unicidad en salida
+    if "CardCode" in df_largo.columns and "CardCode" not in df_enr.columns:
+        df_enr["CardCode"] = df_largo["CardCode"].values
 
-    print("[DEBUG-FILTRO] ▶ Diagnóstico completo previo al filtro de cambios:")
+    # Diagnóstico completo
     df_enr["Delta"] = df_enr["Cant"] - df_enr["Cant_Anterior"]
+    print("[DEBUG-FILTRO] ▶ Diagnóstico completo previo al filtro de cambios:")
     print(
         df_enr[
             [
@@ -233,6 +269,7 @@ def _enriquecer_y_filtrar(
         .to_string(index=False)
     )
 
+    # Resumen de Δ=0
     df_sin_delta = df_enr[df_enr["Delta"] == 0].copy()
     if not df_sin_delta.empty:
         print(
@@ -246,44 +283,64 @@ def _enriquecer_y_filtrar(
     else:
         print("[DEBUG-FILTRO] ✅ Todos los registros tenían algún cambio.")
 
-    # ✅ Filtrar según configuración
+    # ------------------------------------------------------
+    # 3) REGLAS A/B/C (idempotentes) + métricas de transición
+    # ------------------------------------------------------
+    # Bajas (>0→0), Altas (0→>0), Cambios (>0→>0, Δ≠0)
+    bajas_mask = (df_enr["Cant_Anterior"] > 0) & (df_enr["Cant"] == 0)
+    altas_mask = (df_enr["Cant_Anterior"] == 0) & (df_enr["Cant"] > 0)
+    cambios_mask = (
+        (df_enr["Cant_Anterior"] > 0) & (df_enr["Cant"] > 0) & (df_enr["Delta"] != 0)
+    )
+
+    # Ignorar flag heredado (deprecado)
     if incluir_deltas_cero_si_es_individual:
-        df_out = df_enr[df_enr["Cant"] > 0].copy()
         print(
-            "[DEBUG-FILTRO] 🚩 Se incluye todo registro con cantidad > 0 por transición individual"
+            "[INFO] `incluir_deltas_cero_si_es_individual` está DEPRECADO y se ignora. "
+            "Se aplican reglas A/B/C."
         )
-    else:
-        df_out = df_enr[df_enr["Delta"] != 0].copy()
+
+    df_out = df_enr[bajas_mask | altas_mask | cambios_mask].copy()
+
+    print(
+        f"[DEBUG-FILTRO] zero_transitions_applied (bajas >0→0): {int(bajas_mask.sum())}"
+    )
+    print(f"[DEBUG-FILTRO] altas 0→>0: {int(altas_mask.sum())}")
+    print(f"[DEBUG-FILTRO] otros cambios (Δ≠0 con >0→>0): {int(cambios_mask.sum())}")
 
     print(f"[DEBUG-FILTRO] Registros con cambio real detectado: {len(df_out)}")
     if not df_out.empty:
         print("[DEBUG-FILTRO] Preview de cambios:")
         print(
             df_out[["ItemCode", "TipoForecast", "Mes", "Cant_Anterior", "Cant"]]
-            .head(5)
+            .head(10)
             .to_string(index=False)
         )
 
-        delta_total = df_out["Delta"].sum()
+        delta_total = float(df_out["Delta"].sum())
         print(f"[DEBUG-FILTRO] Variación total de unidades: {delta_total:.2f}")
 
         resumen_mes = df_out.groupby("Mes")["Delta"].sum().reset_index()
         print("[DEBUG-FILTRO] Resumen de delta por mes:")
         print(resumen_mes.to_string(index=False))
 
-    from utils.repositorio_forecast.forecast_writer import validate_delta_schema
-
+    # --------------------------------------
+    # 4) Validación de esquema de delta (B2)
+    # --------------------------------------
     df_val = df_out.rename(
         columns={"Cant_Anterior": "CantidadAnterior", "Cant": "CantidadNueva"}
     )
     validate_delta_schema(df_val, contexto="[VALIDACIÓN ENRIQUECER]")
 
+    # ------------------------------------------
+    # 5) Validación de unicidad post-enriquecido
+    # ------------------------------------------
     claves_bd = ["ItemCode", "TipoForecast", "OcrCode3", "Mes", "CardCode"]
     if "CardCode" in df_out.columns:
         duplicados_out = df_out.duplicated(subset=claves_bd, keep=False)
         if duplicados_out.any():
             print(
-                f"[❌ FILTRO-ERROR] {duplicados_out.sum()} duplicados detectados post-enriquecimiento:"
+                f"[❌ FILTRO-ERROR] {int(duplicados_out.sum())} duplicados detectados post-enriquecimiento:"
             )
             print(
                 df_out[duplicados_out][claves_bd + ["Cant", "Cant_Anterior"]]
@@ -488,10 +545,6 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
             forecast_id_prev = _get_forecast_id_prev(slpcode, cliente, anio, db_path)
             print(
                 f"[DEBUG-GUARDADO] Paso 3: ForecastID nuevo = {forecast_id}, anterior = {forecast_id_prev}"
-            )
-
-            from utils.repositorio_forecast.forecast_writer import (
-                existe_forecast_individual,
             )
 
             modo_individual = existe_forecast_individual(
@@ -710,7 +763,16 @@ def _get_forecast_id_prev(
     Si no existe Forecast individual, intenta buscar uno global (sin CardCode).
     Retorna None si no se encuentra ningún historial.
     """
+    print("🔍 [FORECAST-PREV-START] Buscando forecast histórico")
+    print(
+        f"📊 [FORECAST-PREV-INFO] slpcode: {slpcode}, cardcode: {cardcode}, anio: {anio}"
+    )
+    print(f"🗄️  [FORECAST-PREV-INFO] db_path: {db_path}")
+
     # 1. Intento por cliente específico
+    print(
+        "🔍 [FORECAST-PREV-STEP] Buscando forecast individual (cliente específico)..."
+    )
     qry_individual = """
         SELECT MAX(fd.ForecastID) AS id
         FROM   Forecast_Detalle fd
@@ -718,28 +780,48 @@ def _get_forecast_id_prev(
           AND  fd.CardCode = ?
           AND  strftime('%Y', fd.FechEntr) = ?;
     """
+    print(f"📝 [FORECAST-PREV-QUERY] Query individual: {qry_individual.strip()}")
+    print(
+        f"📋 [FORECAST-PREV-PARAMS] Params: slpcode={slpcode}, cardcode={cardcode}, anio={anio}"
+    )
+
     df_ind = run_query(
         qry_individual, params=(slpcode, cardcode, str(anio)), db_path=db_path
     )
+    print(f"📊 [FORECAST-PREV-RESULT] Resultado individual - shape: {df_ind.shape}")
+
     if not df_ind.empty and pd.notna(df_ind.iloc[0].id):
-        print(f"[DEBUG-HISTORIAL] Se usará ForecastID individual: {df_ind.iloc[0].id}")
-        return int(df_ind.iloc[0].id)
+        forecast_id = int(df_ind.iloc[0].id)
+        print(
+            f"✅ [FORECAST-PREV-FOUND] ForecastID individual encontrado: {forecast_id}"
+        )
+        return forecast_id
+    else:
+        print("❌ [FORECAST-PREV-NOTFOUND] No se encontró forecast individual")
 
     # 2. Intento fallback: Forecast global para el mismo SlpCode (sin filtrar CardCode)
+    print("🔍 [FORECAST-PREV-STEP] Buscando forecast global (fallback)...")
     qry_global = """
         SELECT MAX(fd.ForecastID) AS id
         FROM   Forecast_Detalle fd
         WHERE  fd.SlpCode  = ?
           AND  strftime('%Y', fd.FechEntr) = ?;
     """
+    print(f"📝 [FORECAST-PREV-QUERY] Query global: {qry_global.strip()}")
+    print(f"📋 [FORECAST-PREV-PARAMS] Params: slpcode={slpcode}, anio={anio}")
+
     df_glob = run_query(qry_global, params=(slpcode, str(anio)), db_path=db_path)
+    print(f"📊 [FORECAST-PREV-RESULT] Resultado global - shape: {df_glob.shape}")
+
     if not df_glob.empty and pd.notna(df_glob.iloc[0].id):
-        print(
-            f"[DEBUG-HISTORIAL] No existe forecast individual. Se usará ForecastID global: {df_glob.iloc[0].id}"
-        )
-        return int(df_glob.iloc[0].id)
+        forecast_id = int(df_glob.iloc[0].id)
+        print(f"✅ [FORECAST-PREV-FOUND] ForecastID global encontrado: {forecast_id}")
+        return forecast_id
+    else:
+        print("❌ [FORECAST-PREV-NOTFOUND] No se encontró forecast global")
 
     print(
-        "[DEBUG-HISTORIAL] ⚠️ No se encontró forecast histórico (ni individual ni global). Se parte desde cero."
+        "⚠️  [FORECAST-PREV-END] No se encontró forecast histórico (ni individual ni global)"
     )
+    print("🆕 [FORECAST-PREV-INFO] Se partirá desde cero (forecast nuevo)")
     return None
