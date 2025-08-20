@@ -117,6 +117,15 @@ def validate_delta_schema(
 def existe_forecast_individual(
     slpcode: int, cardcode: str, anio: int, db_path: str
 ) -> bool:
+    """
+    Verifica si existe un forecast individual para un cliente específico.
+    """
+    print("🔍 [EXISTE-FORECAST-START] Verificando existencia de forecast individual")
+    print(
+        f"📊 [EXISTE-FORECAST-INFO] slpcode: {slpcode}, cardcode: {cardcode}, anio: {anio}"
+    )
+    print(f"🗄️  [EXISTE-FORECAST-INFO] db_path: {db_path}")
+
     qry = """
         SELECT 1
         FROM Forecast_Detalle
@@ -125,5 +134,26 @@ def existe_forecast_individual(
           AND strftime('%Y', FechEntr) = ?
         LIMIT 1
     """
+    print("📝 [EXISTE-FORECAST-QUERY] Query ejecutada:")
+    print(f"   {qry.strip()}")
+    print(
+        f"📋 [EXISTE-FORECAST-PARAMS] Parámetros: ({slpcode}, '{cardcode}', '{anio}')"
+    )
+
     df = run_query(qry, params=(slpcode, cardcode, str(anio)), db_path=db_path)
-    return not df.empty
+    print(f"📊 [EXISTE-FORECAST-RESULT] Resultado query - shape: {df.shape}")
+    print(f"📈 [EXISTE-FORECAST-INFO] DataFrame vacío: {df.empty}")
+
+    existe = not df.empty
+
+    if existe:
+        print(
+            f"✅ [EXISTE-FORECAST-FOUND] Forecast individual EXISTE para el cliente {cardcode}"
+        )
+    else:
+        print(
+            f"❌ [EXISTE-FORECAST-NOTFOUND] Forecast individual NO EXISTE para el cliente {cardcode}"
+        )
+
+    print(f"🎯 [EXISTE-FORECAST-END] Resultado: {existe}")
+    return existe

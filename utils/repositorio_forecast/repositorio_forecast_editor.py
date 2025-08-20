@@ -2,6 +2,8 @@
 # # ∂B_BUF001/∂B0
 import pandas as pd  # noqa: E402
 import streamlit as st
+import numpy as np  # noqa: E402
+from typing import Tuple  # noqa: E402
 from config.contexto import obtener_mes
 
 
@@ -188,65 +190,118 @@ def sincronizar_edicion_parcial(cliente: str, df_editado_parcial: pd.DataFrame):
 # B_VFD001: Validación estructural y de contenido del DataFrame de forecast
 # # ∂B_VFD001/∂B0
 def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
+    print("🔍 [VALIDATION-START] Iniciando validación de DataFrame")
+    print(f"📊 [VALIDATION-INFO] DataFrame shape: {df.shape}")
+    print(f"📋 [VALIDATION-INFO] Columnas iniciales: {list(df.columns)}")
+
     errores = []
     columnas_mes = [str(m).zfill(2) for m in range(1, 13)]
+    print(f"📅 [VALIDATION-INFO] Columnas mes esperadas: {columnas_mes}")
 
     df = df.copy()
     df.columns = df.columns.astype(str)
+    print("✅ [VALIDATION-STEP] Columnas convertidas a string")
 
     # Validación básica
+    print("🔍 [VALIDATION-STEP] Validando campos requeridos...")
     campos_requeridos = ["ItemCode", "TipoForecast", "Métrica", "DocCur"]
     for col in campos_requeridos:
         if col not in df.columns:
             errores.append(f"Falta la columna requerida: {col}")
+            print(f"❌ [VALIDATION-ERROR] Falta columna requerida: {col}")
+        else:
+            print(f"✅ [VALIDATION-OK] Columna requerida presente: {col}")
 
     # Normalización de valores clave
+    print("🔄 [VALIDATION-STEP] Normalizando valores clave...")
     if "ItemCode" in df.columns:
         df["ItemCode"] = df["ItemCode"].astype(str).str.strip()
+        print(
+            f"✅ [VALIDATION-INFO] ItemCode normalizado - valores únicos: {df['ItemCode'].nunique()}"
+        )
     if "TipoForecast" in df.columns:
         df["TipoForecast"] = df["TipoForecast"].astype(str).str.strip().str.capitalize()
+        print(
+            f"✅ [VALIDATION-INFO] TipoForecast normalizado - valores: {df['TipoForecast'].unique().tolist()}"
+        )
     if "Métrica" in df.columns:
         df["Métrica"] = df["Métrica"].astype(str).str.strip().str.capitalize()
+        print(
+            f"✅ [VALIDATION-INFO] Métrica normalizada - valores: {df['Métrica'].unique().tolist()}"
+        )
     if "DocCur" in df.columns:
         df["DocCur"] = df["DocCur"].astype(str).str.strip().str.upper()
+        print(
+            f"✅ [VALIDATION-INFO] DocCur normalizado - valores: {df['DocCur'].unique().tolist()}"
+        )
 
     # Validaciones de contenido
+    print("🔍 [VALIDATION-STEP] Validando contenido de columnas...")
     if "Métrica" in df.columns:
-        if not df["Métrica"].isin(["Cantidad", "Precio"]).all():
+        metricas_validas = df["Métrica"].isin(["Cantidad", "Precio"]).all()
+        if not metricas_validas:
             errores.append(
                 "La columna 'Métrica' contiene valores inválidos (solo se permite 'Cantidad' o 'Precio')."
             )
+            print(
+                f"❌ [VALIDATION-ERROR] Valores inválidos en Métrica: {df['Métrica'].unique().tolist()}"
+            )
+        else:
+            print("✅ [VALIDATION-OK] Métricas válidas")
 
     if "DocCur" in df.columns:
-        if not df["DocCur"].str.match(r"^[A-Z]{3}$").all():
+        doccur_validos = df["DocCur"].str.match(r"^[A-Z]{3}$").all()
+        if not doccur_validos:
             errores.append(
                 "La columna 'DocCur' debe contener solo códigos de moneda de 3 letras (ej. CLP, USD, EUR)."
             )
+            print(
+                f"❌ [VALIDATION-ERROR] DocCur inválidos: {df['DocCur'].unique().tolist()}"
+            )
+        else:
+            print("✅ [VALIDATION-OK] DocCur válidos")
 
+    # Validación de columnas mes
+    print("🔍 [VALIDATION-STEP] Validando columnas mensuales...")
+    meses_faltantes = []
     for col in columnas_mes:
         if col not in df.columns:
             errores.append(f"Falta la columna del mes {col}")
+            meses_faltantes.append(col)
+
+    if meses_faltantes:
+        print(f"❌ [VALIDATION-ERROR] Meses faltantes: {meses_faltantes}")
+    else:
+        print("✅ [VALIDATION-OK] Todas las columnas mensuales presentes")
 
     # Validación estructural extendida
+    print("🔍 [VALIDATION-STEP] Validando estructura y duplicados...")
     if {"ItemCode", "TipoForecast", "Métrica", "OcrCode3"}.issubset(df.columns):
-        if (
-            not df[["ItemCode", "TipoForecast", "Métrica", "OcrCode3"]]
-            .drop_duplicates()
-            .shape[0]
-            == df.shape[0]
-        ):
+        duplicados = df.duplicated(
+            subset=["ItemCode", "TipoForecast", "Métrica", "OcrCode3"], keep=False
+        )
+        if duplicados.any():
+            count_duplicados = duplicados.sum()
             errores.append(
                 "Existen filas duplicadas por [ItemCode, TipoForecast, Métrica, OcrCode3]."
             )
+            print(
+                f"❌ [VALIDATION-ERROR] {count_duplicados} filas duplicadas encontradas"
+            )
+        else:
+            print("✅ [VALIDATION-OK] Sin duplicados en clave compuesta")
 
     # Validación de columnas residuales sueltas
+    print("🔍 [VALIDATION-STEP] Validando columnas residuales...")
     if "PrecioUN" in df.columns and "Métrica" in df.columns:
         if not df[df["Métrica"] == "Precio"].empty and "PrecioUN" not in columnas_mes:
             errores.append(
                 "La columna 'PrecioUN' no debe existir como columna suelta. Debe estar distribuida en columnas mensuales."
             )
+            print("❌ [VALIDATION-ERROR] Columna PrecioUN no permitida")
 
     # Validación de columnas inesperadas
+    print("🔍 [VALIDATION-STEP] Buscando columnas inesperadas...")
     col_extranas = [
         col
         for col in df.columns
@@ -256,23 +311,47 @@ def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
     ]
     if col_extranas:
         errores.append(f"Columnas inesperadas detectadas: {col_extranas}")
+        print(f"❌ [VALIDATION-ERROR] Columnas inesperadas: {col_extranas}")
 
     if errores:
+        print(f"❌ [VALIDATION-END] Validación fallida con {len(errores)} errores")
         return errores
 
     # Validación de tipo de datos y negativos
+    print("🔍 [VALIDATION-STEP] Validando tipos de datos y valores negativos...")
     df[columnas_mes] = df[columnas_mes].apply(pd.to_numeric, errors="coerce").fillna(0)
+    print("✅ [VALIDATION-INFO] Columnas mensuales convertidas a numéricas")
 
+    # Validación de valores negativos
+    print("🔍 [VALIDATION-STEP] Buscando valores negativos...")
     for col in columnas_mes:
         negativos = df[df[col] < 0]
         if not negativos.empty:
-            codigos = negativos["ItemCode"].unique().tolist()
+            codigos = (
+                negativos["ItemCode"].unique().tolist()[:5]
+            )  # Mostrar solo primeros 5
             errores.append(f"Valores negativos en mes {col} para: {codigos}")
+            print(
+                f"❌ [VALIDATION-ERROR] Valores negativos en {col}: {len(negativos)} registros"
+            )
 
+    # Validación TipoForecast
+    print("🔍 [VALIDATION-STEP] Validando TipoForecast...")
     if not df["TipoForecast"].isin(["Firme", "Proyectado"]).all():
+        valores_invalidos = (
+            df[~df["TipoForecast"].isin(["Firme", "Proyectado"])]["TipoForecast"]
+            .unique()
+            .tolist()
+        )
         errores.append(
             "TipoForecast contiene valores inválidos (solo se permite 'Firme' o 'Proyectado')."
         )
+        print(f"❌ [VALIDATION-ERROR] TipoForecast inválidos: {valores_invalidos}")
+
+    if errores:
+        print(f"❌ [VALIDATION-END] Validación fallida con {len(errores)} errores")
+    else:
+        print("✅ [VALIDATION-END] Validación exitosa - Sin errores encontrados")
 
     return errores
 
@@ -293,11 +372,16 @@ def sincronizar_buffer_edicion(
     - Aplica cambios históricos del buffer editado a nueva vista df_buffer
     - Usa combinación única (ItemCode, TipoForecast, Métrica, OcrCode3) como clave de actualización
     """
+    print(f"🔄 [SYNC-START] Iniciando sincronización para buffer: {key_buffer}")
+    print(f"📊 [SYNC-INFO] df_buffer shape: {df_buffer.shape}")
+
     key_state = f"{key_buffer}_editado"
     if key_state not in st.session_state:
+        print(f"❌ [SYNC-SKIP] No hay estado editado para: {key_buffer}")
         return df_buffer
 
     df_editado = st.session_state[key_state]
+    print(f"📝 [SYNC-INFO] df_editado shape: {df_editado.shape}")
 
     # 🧠 NUEVO BLOQUE PARA CORTAR LOOP
     if hash_semantico(df_editado) == hash_semantico(df_buffer):
@@ -307,60 +391,80 @@ def sincronizar_buffer_edicion(
         return df_buffer
 
     columnas_clave = ["ItemCode", "TipoForecast", "Métrica", "OcrCode3"]
+    print(f"🔑 [SYNC-INFO] Columnas clave: {columnas_clave}")
+
     # ✅ Validar unicidad de clave compuesta antes de indexar
     if df_editado.duplicated(subset=columnas_clave).any():
-        print("[?? DEBUG-SYNC] df_editado tiene claves duplicadas ? update() fallar�")
-        print(
-            df_editado[
-                df_editado.duplicated(subset=columnas_clave, keep=False)
-            ].sort_values(columnas_clave)
-        )
+        print("[❌ DEBUG-SYNC] df_editado tiene claves duplicadas - update() fallará")
+        duplicados = df_editado[
+            df_editado.duplicated(subset=columnas_clave, keep=False)
+        ].sort_values(columnas_clave)
+        print(f"📋 [DUPLICADOS] {len(duplicados)} registros duplicados encontrados:")
+        print(duplicados.head())
         raise ValueError(
             "Claves duplicadas detectadas en df_editado. No se puede sincronizar con update()"
         )
 
     columnas_mes = [f"{i:02d}" for i in range(1, 13)]
+    print(f"📅 [SYNC-INFO] Columnas mes: {columnas_mes}")
 
     # 🔒 Filtrar columnas prohibidas
     columnas_prohibidas = ["PrecioUN", "_PrecioUN_", "PrecioUnitario"]
+    columnas_eliminadas = [c for c in columnas_prohibidas if c in df_editado.columns]
+    if columnas_eliminadas:
+        print(f"🚫 [SYNC-INFO] Eliminando columnas prohibidas: {columnas_eliminadas}")
+
     df_editado = df_editado.drop(
-        columns=[c for c in columnas_prohibidas if c in df_editado.columns],
+        columns=columnas_eliminadas,
         errors="ignore",
     )
 
     # 🔍 Validar columnas mensuales
     faltantes = [col for col in columnas_mes if col not in df_editado.columns]
     if faltantes:
+        print(f"❌ [SYNC-ERROR] Faltan columnas mensuales: {faltantes}")
         raise ValueError(
             f"El buffer editado carece de columnas mensuales requeridas: {faltantes}"
         )
 
     df_actualizado = df_buffer.copy()
+    print(f"📋 [SYNC-INFO] df_actualizado shape inicial: {df_actualizado.shape}")
 
     try:
+        print("🔧 [SYNC-STEP] Configurando índices...")
         df_actualizado = df_actualizado.set_index(columnas_clave)
         df_editado = df_editado.set_index(columnas_clave)
+        print(
+            f"📊 [SYNC-INFO] Índices configurados - df_actualizado: {df_actualizado.shape}, df_editado: {df_editado.shape}"
+        )
 
         # 🧪 Validar cobertura de claves
         claves_faltantes = set(df_actualizado.index) - set(df_editado.index)
         if claves_faltantes:
             print(
-                f"⚠️ Advertencia: {len(claves_faltantes)} combinaciones clave no fueron editadas."
+                f"⚠️ [SYNC-WARN] {len(claves_faltantes)} combinaciones clave no fueron editadas"
             )
 
         # 🛑 Ordenar índices para evitar PerformanceWarning
+        print("🔃 [SYNC-STEP] Ordenando índices...")
         df_actualizado = df_actualizado.sort_index()
         df_editado = df_editado.sort_index()
 
         # 🧠 Evitar update si no hay diferencias
+        print("🔍 [SYNC-STEP] Comparando datos...")
         try:
             iguales = df_actualizado[columnas_mes].equals(df_editado[columnas_mes])
+            print(f"📊 [SYNC-COMP] ¿Datos iguales? {iguales}")
         except Exception as e:
             print(f"[⚠️ COMPARACIÓN FALLIDA] {e}")
             iguales = False
 
         if not iguales:
+            print("🔄 [SYNC-STEP] Aplicando actualizaciones...")
             df_actualizado.update(df_editado[columnas_mes])
+            print("✅ [SYNC-STEP] Actualizaciones aplicadas")
+        else:
+            print("⏭️ [SYNC-STEP] Sin cambios - saltando actualización")
 
         # ✅ Restaurar columnas adicionales que no fueron tocadas por edición
         columnas_extra = [
@@ -368,13 +472,23 @@ def sincronizar_buffer_edicion(
             for col in df_buffer.columns
             if col not in df_actualizado.reset_index().columns
         ]
-        for col in columnas_extra:
-            df_actualizado[col] = df_buffer.set_index(columnas_clave)[col]
+        if columnas_extra:
+            print(
+                f"📋 [SYNC-STEP] Restaurando {len(columnas_extra)} columnas extra: {columnas_extra}"
+            )
+            for col in columnas_extra:
+                df_actualizado[col] = df_buffer.set_index(columnas_clave)[col]
 
         df_actualizado = df_actualizado.reset_index()
+        print(
+            f"✅ [SYNC-SUCCESS] Sincronización completada - shape final: {df_actualizado.shape}"
+        )
 
     except Exception as e:
-        print(f"[ERROR] No se pudo sincronizar buffer editado: {e}")
+        print(f"❌ [SYNC-ERROR] No se pudo sincronizar buffer editado: {e}")
+        import traceback
+
+        traceback.print_exc()
         return df_buffer
 
     return df_actualizado
@@ -413,13 +527,6 @@ def actualizar_buffer_global(df_editado: pd.DataFrame, key_buffer: str):
     st.session_state["__buffer_editado__"] = True
 
 
-# B_SYN003: Fusión estructural del buffer activo con edición parcial visual
-# # ∂B_SYN003/∂B0
-from typing import Tuple  # noqa: E402
-import numpy as np  # noqa: E402
-import pandas as pd  # noqa: E402
-
-
 def sincronizar_buffer_local(
     df_buffer: pd.DataFrame, df_editado: pd.DataFrame
 ) -> Tuple[pd.DataFrame, bool]:
@@ -427,7 +534,12 @@ def sincronizar_buffer_local(
     Fusiona los cambios del editor con el buffer activo y
     devuelve (df_final, hay_cambios).
     """
+    print("🔄 [SYNC-LOCAL-START] Iniciando sincronización buffer local")
+    print(f"📊 [SYNC-LOCAL-INFO] df_buffer shape: {df_buffer.shape}")
+    print(f"📝 [SYNC-LOCAL-INFO] df_editado shape: {df_editado.shape}")
+
     columnas_clave = ["ItemCode", "TipoForecast", "Métrica", "OcrCode3"]
+    print(f"🔑 [SYNC-LOCAL-INFO] Columnas clave: {columnas_clave}")
 
     # ── Detectar dinámicamente las columnas-mes ──────────────────────────────
     columnas_mes = sorted(
@@ -436,33 +548,40 @@ def sincronizar_buffer_local(
     )
     columnas_req = columnas_clave + columnas_mes
 
-    print("[DEBUG-SYNC] Iniciando sincronización para forecast_buffer")
-    print(f"[DEBUG-SYNC] Tamaño DF editado recibido: {df_editado.shape}")
-    print(f"[DEBUG-SYNC] Buffer base recuperado:  {df_buffer.shape}")
+    print(f"📅 [SYNC-LOCAL-INFO] Columnas mes detectadas: {columnas_mes}")
+    print(f"📋 [SYNC-LOCAL-INFO] Columnas requeridas: {columnas_req}")
 
     # ── Validación mínima de esquema ────────────────────────────────────────
     faltantes = set(columnas_req) - set(df_editado.columns)
     if faltantes:
+        print(f"❌ [SYNC-LOCAL-ERROR] Columnas faltantes en editado: {faltantes}")
         raise ValueError(
             f"El DataFrame editado carece de columnas requeridas: {faltantes}"
         )
 
     # ── Índices normalizados ────────────────────────────────────────────────
+    print("🔧 [SYNC-LOCAL-STEP] Configurando índices...")
     buf_idx = df_buffer.set_index(columnas_clave)
     edi_idx = df_editado.set_index(columnas_clave)
 
     # Ordenarlos una única vez: evita PerformanceWarning y acelera update()
     buf_idx = buf_idx.sort_index()
     edi_idx = edi_idx.sort_index()
+    print(
+        f"📊 [SYNC-LOCAL-INFO] Índices ordenados - buffer: {buf_idx.shape}, editado: {edi_idx.shape}"
+    )
 
     # Unir índices para contemplar filas nuevas/eliminadas
     idx_union = buf_idx.index.union(edi_idx.index)
+    print(f"🔗 [SYNC-LOCAL-INFO] Unión de índices: {len(idx_union)} registros únicos")
 
     # IMPORTANTÍSIMO: reindex devuelve vistas DESORDENADAS → volvemos a ordenar
     buf_idx = buf_idx.reindex(idx_union).sort_index()
     edi_idx = edi_idx.reindex(idx_union).sort_index()
+    print("✅ [SYNC-LOCAL-STEP] Reindexado y ordenado completado")
 
     # ── Comparación de celdas (tolerante a float/NaN) ───────────────────────
+    print("🔍 [SYNC-LOCAL-STEP] Comparando celdas...")
     diff_array = ~np.isclose(
         buf_idx[columnas_mes], edi_idx[columnas_mes], atol=1e-6, equal_nan=True
     )
@@ -473,23 +592,24 @@ def sincronizar_buffer_local(
     hay_cambios = total_diff > 0
 
     if hay_cambios:
-        print(f"[DEBUG-SYNC] Total celdas modificadas: {total_diff}")
-        print(f"[DEBUG-SYNC] Filas afectadas: {filas_diff}")
+        print(f"📈 [SYNC-LOCAL-CHANGES] Total celdas modificadas: {total_diff}")
+        print(f"📈 [SYNC-LOCAL-CHANGES] Filas afectadas: {filas_diff}")
         cols_mod = dif_mask.any().pipe(lambda s: s[s].index.tolist())
-        print(f"[DEBUG-SYNC] Columnas mensuales modificadas: {cols_mod}")
+        print(f"📈 [SYNC-LOCAL-CHANGES] Columnas mensuales modificadas: {cols_mod}")
 
         # Aplicar cambios
+        print("🔄 [SYNC-LOCAL-STEP] Aplicando actualizaciones...")
         buf_idx.update(edi_idx[columnas_mes])
 
         # Filas completamente nuevas
         filas_nuevas = dif_mask.index[dif_mask.all(axis=1)]
         if len(filas_nuevas):
-            print(f"[DEBUG-SYNC] Filas nuevas detectadas: {len(filas_nuevas)}")
+            print(f"🆕 [SYNC-LOCAL-NEW] Filas nuevas detectadas: {len(filas_nuevas)}")
             buf_idx.loc[filas_nuevas, columnas_mes] = edi_idx.loc[
                 filas_nuevas, columnas_mes
             ]
     else:
-        print("[DEBUG-SYNC] No se detectaron diferencias reales.")
+        print("✅ [SYNC-LOCAL-INFO] No se detectaron diferencias reales.")
 
     # ── Reconstrucción final con columnas extra ─────────────────────────────
     #    Calculamos todas las columnas NO-mes ni clave presentes en
@@ -500,17 +620,24 @@ def sincronizar_buffer_local(
         if c not in columnas_clave and c not in columnas_mes
     ]
 
-    #   Restaura esos campos priorizando datos de df_editado
     if cols_extra_union:
+        print(
+            f"📋 [SYNC-LOCAL-STEP] Procesando {len(cols_extra_union)} columnas extra: {cols_extra_union}"
+        )
+
         # a) Start with values from buffer (may include NaN)
         buf_idx[cols_extra_union] = df_buffer.set_index(columnas_clave)[
             cols_extra_union
         ].reindex(buf_idx.index)
+
         # b) Update with non-NaN coming from editado
         edi_extra = df_editado.set_index(columnas_clave)[cols_extra_union].reindex(
             buf_idx.index
         )
         buf_idx.update(edi_extra)
+        print("✅ [SYNC-LOCAL-STEP] Columnas extra actualizadas")
+    else:
+        print("ℹ️  [SYNC-LOCAL-INFO] No hay columnas extra para procesar")
 
     #   Ensamblamos el DataFrame final
     df_final = buf_idx.reset_index().reindex(columns=columnas_req + cols_extra_union)
@@ -518,8 +645,10 @@ def sincronizar_buffer_local(
     #   Aplicar dtypes solo a columnas presentes
     dtype_map = {c: t for c, t in df_buffer.dtypes.items() if c in df_final.columns}
     df_final = df_final.astype(dtype_map, errors="ignore")
+    print(f"✅ [SYNC-LOCAL-DTYPES] Dtypes aplicados: {len(dtype_map)} columnas")
 
-    print(f"[DEBUG-SYNC] Buffer final preparado. Filas: {len(df_final)}")
-    print(f"[DEBUG-SYNC] Columnas finales: {list(df_final.columns)}")
+    print(f"🎯 [SYNC-LOCAL-END] Buffer final preparado. Shape: {df_final.shape}")
+    print(f"📊 [SYNC-LOCAL-RESULT] Hay cambios: {hay_cambios}")
+    print(f"📋 [SYNC-LOCAL-COLUMNS] Columnas finales: {list(df_final.columns)}")
 
     return df_final, hay_cambios
