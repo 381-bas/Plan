@@ -1,6 +1,7 @@
 ﻿# B_SYN001: Importaciones principales y utilidades para sincronización y guardado multicliente
 # # ∂B_SYN001/∂B0
 import pandas as pd
+import numpy as np
 import streamlit as st
 from typing import Optional
 
@@ -367,9 +368,11 @@ def _refrescar_buffer_ui(forecast_id: int, key_buffer: str, db_path: str):
     """
     Reconstruye el buffer de UI SOLO desde BD para el ForecastID activo,
     deduplicando por clave de negocio y sin sumar registros duplicados.
+    Además, garantiza SIEMPRE 4 filas (Cantidad/Precio × Firme/Proyectado)
+    y 12 meses (01..12) por par base (ItemCode+OcrCode3+DocCur).
 
     Requisitos:
-      - Función helper: run_query(sql, params=(), db_path=None) -> DataFrame
+      - run_query(sql, params=(), db_path=None) -> DataFrame
       - Motor: SQLite (usa ROWID para ordenar "el último").
     """
     print(
@@ -400,7 +403,8 @@ def _refrescar_buffer_ui(forecast_id: int, key_buffer: str, db_path: str):
         st.session_state[key_buffer] = None
         return
 
-    print(f"[DEBUG-BUFFER] Registros recuperados: {len(df_post)}")
+    print(f"[DEBUG-BUFFER] Registros recuperados (raw): {len(df_post)}")
+    print(f"[DEBUG-BUFFER] Columnas recuperadas: {list(df_post.columns)}")
 
     # 2) Normalizar Mes a '01'..'12'
     df_post["Mes"] = df_post["Mes"].astype(str).str.zfill(2)
@@ -411,14 +415,26 @@ def _refrescar_buffer_ui(forecast_id: int, key_buffer: str, db_path: str):
         sort_cols.append("FechEntr")
     sort_cols.append("_rid")  # siempre existe en SQLite
     df_post = df_post.sort_values(sort_cols)
+    print(f"[DEBUG-BUFFER] Orden aplicado por columnas: {sort_cols}")
 
-    # 4) Deduplicar por clave de negocio a nivel de mes
+    # 4) Deduplicar por clave de negocio a nivel de mes (nos quedamos con el último)
     claves_mes = ["ItemCode", "TipoForecast", "OcrCode3", "DocCur", "Mes"]
+    before_dedup = len(df_post)
     df_dedup = df_post.drop_duplicates(claves_mes, keep="last").copy()
+    after_dedup = len(df_dedup)
+    print(
+        f"[DEBUG-BUFFER] Deduplicación por {claves_mes} -> {before_dedup} → {after_dedup} filas"
+    )
 
-    # 5) Mapear 'Linea' representativa (última) por clave sin Mes
-    clave_sin_mes = ["ItemCode", "TipoForecast", "OcrCode3", "DocCur"]
-    linea_map = df_dedup.groupby(clave_sin_mes, as_index=False)["Linea"].last()
+    # 5) Mapear 'Linea' representativa
+    #    (a) por clave completa (incluye TipoForecast)
+    clave_sin_mes_full = ["ItemCode", "TipoForecast", "OcrCode3", "DocCur"]
+    linea_map_full = df_dedup.groupby(clave_sin_mes_full, as_index=False)[
+        "Linea"
+    ].last()
+    #    (b) fallback por clave sin TipoForecast (para rellenar si falta)
+    clave_base = ["ItemCode", "OcrCode3", "DocCur"]
+    linea_map_base = df_dedup.groupby(clave_base, as_index=False)["Linea"].last()
 
     # 6) Pivots sin agregar por suma (usar último valor)
     meses = [f"{i:02d}" for i in range(1, 13)]
@@ -426,7 +442,7 @@ def _refrescar_buffer_ui(forecast_id: int, key_buffer: str, db_path: str):
     # Cantidad
     pivot_cant = (
         df_dedup.pivot_table(
-            index=clave_sin_mes,
+            index=clave_sin_mes_full,
             columns="Mes",
             values="Cant",
             aggfunc="last",
@@ -440,7 +456,7 @@ def _refrescar_buffer_ui(forecast_id: int, key_buffer: str, db_path: str):
     # Precio
     pivot_prec = (
         df_dedup.pivot_table(
-            index=clave_sin_mes,
+            index=clave_sin_mes_full,
             columns="Mes",
             values="PrecioUN",
             aggfunc="last",
@@ -451,29 +467,91 @@ def _refrescar_buffer_ui(forecast_id: int, key_buffer: str, db_path: str):
     )
     pivot_prec["Métrica"] = "Precio"
 
+    print(
+        f"[DEBUG-BUFFER] pivot_cant shape: {pivot_cant.shape} | pivot_prec shape: {pivot_prec.shape}"
+    )
+
     # 7) Unir métricas y re-incorporar 'Linea'
     df_metrico = pd.concat([pivot_cant, pivot_prec], ignore_index=True)
-    df_metrico = df_metrico.merge(linea_map, on=clave_sin_mes, how="left")
+    df_metrico = df_metrico.merge(
+        linea_map_full, on=clave_sin_mes_full, how="left", suffixes=("", "_from_full")
+    )
 
-    # 8) Reordenar columnas finales
+    # Fallback Linea por clave base si quedó nulo
+    mask_linea_null = df_metrico["Linea"].isna()
+    if mask_linea_null.any():
+        print(
+            f"[DEBUG-BUFFER] Línea sin asignar (full): {mask_linea_null.sum()} — aplicando fallback por {clave_base}"
+        )
+        df_metrico = df_metrico.merge(
+            linea_map_base, on=clave_base, how="left", suffixes=("", "_fallback")
+        )
+        df_metrico["Linea"] = df_metrico["Linea"].fillna(df_metrico["Linea_fallback"])
+        df_metrico.drop(
+            columns=[c for c in df_metrico.columns if c.endswith("_fallback")],
+            inplace=True,
+        )
+
+    # 8) GARANTIZAR SIEMPRE 4 filas (Firme/Proyectado × Cantidad/Precio) por base (ItemCode+OcrCode3+DocCur)
+    base = df_metrico[clave_base].drop_duplicates()
+    tipos = pd.DataFrame({"TipoForecast": ["Firme", "Proyectado"]})
+    metricas = pd.DataFrame({"Métrica": ["Cantidad", "Precio"]})
+    grid = base.merge(tipos, how="cross").merge(metricas, how="cross")
+
+    # Merge del grid con lo ya pivotado
+    df_metrico = grid.merge(
+        df_metrico,
+        how="left",
+        on=["ItemCode", "OcrCode3", "DocCur", "TipoForecast", "Métrica"],
+        suffixes=("", "_y"),
+    )
+
+    # Rellenos de meses y Linea
+    for m in meses:
+        if m not in df_metrico.columns:
+            df_metrico[m] = 0.0
+        df_metrico[m] = pd.to_numeric(df_metrico[m], errors="coerce").fillna(0.0)
+
+    # Si aún faltase Linea, completar con el último disponible por base
+    if df_metrico["Linea"].isna().any():
+        print(
+            f"[DEBUG-BUFFER] Línea aún nula tras merge: {df_metrico['Linea'].isna().sum()} — completando por base"
+        )
+        df_metrico = df_metrico.merge(
+            linea_map_base, on=clave_base, how="left", suffixes=("", "_b")
+        )
+        df_metrico["Linea"] = df_metrico["Linea"].fillna(df_metrico["Linea_b"])
+        df_metrico.drop(
+            columns=[c for c in df_metrico.columns if c.endswith("_b")], inplace=True
+        )
+
+    # 9) Reordenar columnas finales (fijas + 12 meses)
     cols_fijas = ["ItemCode", "TipoForecast", "OcrCode3", "Linea", "DocCur", "Métrica"]
     df_metrico = (
-        df_metrico[cols_fijas + [m for m in meses if m in df_metrico.columns]]
+        df_metrico[cols_fijas + meses]
         .sort_values(by=["ItemCode", "TipoForecast", "Métrica"])
         .reset_index(drop=True)
     )
 
+    print(
+        f"[DEBUG-BUFFER] Grid base: {len(base)} | Filas finales (deben ser base×4): {len(df_metrico)}"
+    )
     print(f"[DEBUG-BUFFER] Columnas finales: {df_metrico.columns.tolist()}")
     print(f"[DEBUG-BUFFER] Buffer final generado. Filas: {len(df_metrico)}")
+    print("[DEBUG-BUFFER] Preview (primeras 2 filas):")
+    try:
+        print(df_metrico.head(2).to_string(index=False))
+    except Exception as e:
+        print(f"[DEBUG-BUFFER] (no se pudo imprimir preview) {e}")
 
-    # 9) Persistir en sesión con el mismo índice que ya usas
+    # 10) Persistir en sesión con el mismo índice que ya usas
     st.session_state[key_buffer] = df_metrico.set_index(
         ["ItemCode", "TipoForecast", "Métrica"]
     )
 
     print(f"[DEBUG-BUFFER-REFRESH] Inicio refresh UI - key_buffer: {key_buffer}")
     print(
-        f"[DEBUG-BUFFER-REFRESH] Estado buffer antes: {st.session_state.get(key_buffer, 'No existe')}"
+        f"[DEBUG-BUFFER-REFRESH] Estado buffer antes (len): {len(st.session_state.get(key_buffer, [])) if st.session_state.get(key_buffer, None) is not None else 'None'}"
     )
     print("[DEBUG-BUFFER-REFRESH] Completado refresh UI")
 
@@ -481,6 +559,7 @@ def _refrescar_buffer_ui(forecast_id: int, key_buffer: str, db_path: str):
 # B_SYN003: Guardado estructurado y seguro de buffers editados de todos los clientes
 # # ∂B_SYN003/∂B0
 def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
+
     print("[DEBUG-SAVE-MAIN] 🚀 Iniciando proceso de guardado")
     print(f"[DEBUG-SAVE-MAIN] Session state actual: {list(st.session_state.keys())}")
     print(
@@ -498,13 +577,13 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
     print(f"[DEBUG-SAVE-BATCH] Estado session_state antes: {dict(st.session_state)}")
 
     for cliente in clientes:
+        key_buffer = f"forecast_buffer_cliente_{cliente}"
         print(f"\n[DEBUG-SAVE-MAIN] 📝 Procesando cliente: {cliente}")
-        print(f"[DEBUG-SAVE-MAIN] Buffer key: forecast_buffer_cliente_{cliente}")
+        print(f"[DEBUG-SAVE-MAIN] Buffer key: {key_buffer}")
         print(
-            f"[DEBUG-SAVE-MAIN] Estado buffer pre-guardado: {st.session_state.get(f'forecast_buffer_cliente_{cliente}', 'No existe')}"
+            f"[DEBUG-SAVE-MAIN] Estado buffer pre-guardado: {st.session_state.get(key_buffer, 'No existe')}"
         )
 
-        key_buffer = f"forecast_buffer_cliente_{cliente}"
         if key_buffer not in st.session_state:
             print(f"[WARN] Buffer no encontrado en sesión para {cliente}")
             st.warning(f"⚠️ No se encontró buffer para cliente {cliente}.")
@@ -526,19 +605,26 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                 )
                 continue
 
+            # 1) Transformación a largo
             df_largo = df_forecast_metrico_to_largo(df_base, anio, cliente, slpcode)
             print(f"[DEBUG-GUARDADO] Paso 2: DF_LARGO generado (filas={len(df_largo)})")
-            print(
-                df_largo[["ItemCode", "TipoForecast", "Mes", "Cant"]]
-                .head(5)
-                .to_string(index=False)
-            )
+            try:
+                print(
+                    df_largo[["ItemCode", "TipoForecast", "Mes", "Cant"]]
+                    .head(8)
+                    .to_string(index=False)
+                )
+            except Exception as e_head:
+                print(
+                    f"[DEBUG-GUARDADO] (no se pudo imprimir preview DF_LARGO) {e_head}"
+                )
 
             if df_largo.empty:
                 print(f"[DEBUG-GUARDADO] 🟡 DF_LARGO vacío, se omite cliente {cliente}")
                 st.info(f"ℹ️ Sin datos para guardar en cliente {cliente}.")
                 continue
 
+            # 2) Obtener IDs de forecast
             forecast_id = obtener_forecast_activo(
                 slpcode, cliente, anio, db_path, force_new=False
             )
@@ -547,10 +633,10 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                 f"[DEBUG-GUARDADO] Paso 3: ForecastID nuevo = {forecast_id}, anterior = {forecast_id_prev}"
             )
 
+            # 3) Filtrado en base a histórico
             modo_individual = existe_forecast_individual(
                 slpcode, cliente, anio, db_path
             )
-
             df_largo_filtrado = _enriquecer_y_filtrar(
                 df_largo,
                 forecast_id_prev,
@@ -570,8 +656,11 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                 st.info(
                     f"⏩ Cliente {cliente}: sin cambios reales. Se omite inserción."
                 )
+                # 🔁 RESET suave: aunque no haya cambios, limpiamos estado de edición de este cliente
+                _reset_estado_edicion_por_cliente(cliente, key_buffer)
                 continue
 
+            # 4) Logging delta
             print("[DEBUG-GUARDADO] Paso 5: Logging de diferencias previas a inserción")
             registrar_log_detalle_cambios(
                 slpcode,
@@ -583,6 +672,7 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                 forecast_id_anterior=forecast_id_prev,
             )
 
+            # 5) Inserción / upsert
             print("[DEBUG-GUARDADO] Paso 6: Insertando forecast detalle en BD")
             print(
                 f"[DEBUG-SAVE-INSERT] Preparando inserción para ForecastID={forecast_id}"
@@ -603,14 +693,49 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                 anio,
                 db_path,
             )
-
             print("[DEBUG-SAVE-INSERT] Inserción completada")
             print(
                 f"[DEBUG-SAVE-INSERT] Estado session_state después: {dict(st.session_state)}"
             )
 
-            print("[DEBUG-GUARDADO] Paso 7: Refrescando buffer UI post-guardado")
+            # 6) Reconstituir SIEMPRE el buffer UI desde BD (4 filas × 12 meses)
+            print(
+                "[DEBUG-GUARDADO] Paso 7: Refrescando buffer UI post-guardado (4×12 garantizado)"
+            )
             _refrescar_buffer_ui(forecast_id, key_buffer, db_path)
+
+            # ✅ Verificación de forma 4×12 (Cantidad/Precio × Firme/Proyectado) por base
+            try:
+                df_ui = st.session_state[key_buffer].reset_index()
+                base = df_ui[["ItemCode", "OcrCode3", "DocCur"]].drop_duplicates()
+                expected = len(base) * 4
+                real = len(df_ui)
+                print(
+                    f"[DEBUG-GUARDADO] Verificación 4×12 → bases={len(base)} | esperado={expected} | real={real}"
+                )
+                if real != expected:
+                    print(
+                        "[WARN] El buffer UI no quedó en múltiplos de 4 filas por base. Revisar _refrescar_buffer_ui."
+                    )
+            except Exception as e_check:
+                print(f"[DEBUG-GUARDADO] (no se pudo verificar 4×12) {e_check}")
+
+            # 7) RESET del editor y marcas de edición (parche A)
+            print("[DEBUG-GUARDADO] Paso 8: Reseteando estado de edición UI")
+            _reset_estado_edicion_por_cliente(cliente, key_buffer)
+
+            # 8) Recalcular y guardar hash del buffer actual (utilidad anti-pestañeo)
+            try:
+                df_for_hash = st.session_state[key_buffer].reset_index()
+                h = pd.util.hash_pandas_object(df_for_hash, index=False).sum()
+                st.session_state[f"{key_buffer}_hash"] = np.uint64(h & ((1 << 64) - 1))
+                print(
+                    f"[DEBUG-GUARDADO] Hash actualizado para {key_buffer}: {st.session_state[f'{key_buffer}_hash']}"
+                )
+            except Exception as e_hash:
+                print(
+                    f"[DEBUG-GUARDADO] ⚠️ No se pudo calcular hash para {key_buffer}: {e_hash}"
+                )
 
             st.success(
                 f"✅ Cliente {cliente} guardado correctamente (ForecastID={forecast_id})."
@@ -622,14 +747,15 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
             )
             st.error(f"❌ Error al guardar cliente {cliente}: {e}")
 
+            # Intento de recuperación visual mínima
             try:
                 print(
                     "[DEBUG-GUARDADO] ↩ Intentando refresco alternativo por error de escritura"
                 )
                 qry_ultimo = """
                     SELECT ItemCode, TipoForecast, OcrCode3, Linea, DocCur, Mes, 
-                        SUM(Cant)       AS Cant, 
-                        MAX(PrecioUN)   AS PrecioUN
+                           SUM(Cant)     AS Cant, 
+                           MAX(PrecioUN) AS PrecioUN
                     FROM (
                         SELECT 
                             ItemCode,
@@ -646,16 +772,14 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                     GROUP BY ItemCode, TipoForecast, OcrCode3, Linea, DocCur, Mes;
                 """
                 df_post = run_query(qry_ultimo, params=(forecast_id,), db_path=db_path)
-
                 if not df_post.empty:
                     print(
-                        "[DEBUG-GUARDADO] Recuperación post-error OK. DF post:",
+                        "[DEBUG-GUARDADO] Recuperación post-error OK. DF post shape:",
                         df_post.shape,
                     )
                     cols_meses = [f"{m:02d}" for m in range(1, 13)]
-                    df_cant = df_post.copy()
+                    df_cant, df_prec = df_post.copy(), df_post.copy()
                     df_cant["Métrica"] = "Cantidad"
-                    df_prec = df_post.copy()
                     df_prec["Métrica"] = "Precio"
                     pivot_cant = df_cant.pivot_table(
                         index=[
@@ -683,7 +807,6 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                         values="PrecioUN",
                         aggfunc="first",
                     )
-
                     df_metrico = (
                         pd.concat([pivot_cant, pivot_prec]).reset_index().fillna(0)
                     )
@@ -699,6 +822,8 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                     st.success(
                         f"✅ Cliente {cliente} guardado correctamente (ForecastID={forecast_id})."
                     )
+                    # Incluso en recuperación, limpiamos estado de edición para evitar loops
+                    _reset_estado_edicion_por_cliente(cliente, key_buffer)
             except Exception as e2:
                 print(
                     f"[ERROR-GUARDADO] ❌ Falló refresco post-error para {cliente}: {e2}"
@@ -709,6 +834,53 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
 
     print("[DEBUG-GUARDADO] 🧼 Limpiando lista de clientes_editados")
     st.session_state.pop("clientes_editados", None)
+
+
+# ————————————————————————————————————————————————————————————
+# Helper local: Reset de estado de edición por cliente (A)
+def _reset_estado_edicion_por_cliente(cliente: str, key_buffer: str):
+    """
+    Limpia el editor y las marcas de edición asociadas a un cliente.
+    - Borra editor_forecast_{cliente}
+    - Borra {key_buffer}_editado (copia temporal)
+    - Setea __buffer_editado__ = False
+    - Saca al cliente del set 'clientes_editados' (si existiera)
+    """
+    try:
+        editor_key = f"editor_forecast_{cliente}"
+        edit_copy_key = f"{key_buffer}_editado"
+        print(
+            f"[DEBUG-RESET] Limpiando estado de edición → editor_key={editor_key}, edit_copy_key={edit_copy_key}"
+        )
+
+        if editor_key in st.session_state:
+            prev = st.session_state[editor_key]
+            st.session_state.pop(editor_key, None)
+            print(f"[DEBUG-RESET] editor_key eliminado. Valor previo: {prev}")
+
+        if edit_copy_key in st.session_state:
+            st.session_state.pop(edit_copy_key, None)
+            print(f"[DEBUG-RESET] {edit_copy_key} eliminado.")
+
+        st.session_state["__buffer_editado__"] = False
+        print(
+            f"[DEBUG-RESET] __buffer_editado__ = {st.session_state.get('__buffer_editado__')}"
+        )
+
+        # Mantener consistencia inmediata del set (aunque luego se limpia globalmente)
+        if (
+            "clientes_editados" in st.session_state
+            and cliente in st.session_state["clientes_editados"]
+        ):
+            st.session_state["clientes_editados"].discard(cliente)
+            print(
+                f"[DEBUG-RESET] '{cliente}' removido de clientes_editados (restan: {st.session_state['clientes_editados']})"
+            )
+
+    except Exception as e_reset:
+        print(
+            f"[DEBUG-RESET] ⚠️ No se pudo limpiar por completo el estado de edición: {e_reset}"
+        )
 
 
 def seleccionar_forecast_base(

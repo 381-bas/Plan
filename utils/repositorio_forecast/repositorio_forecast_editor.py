@@ -194,15 +194,37 @@ def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
     print(f"📊 [VALIDATION-INFO] DataFrame shape: {df.shape}")
     print(f"📋 [VALIDATION-INFO] Columnas iniciales: {list(df.columns)}")
 
-    errores = []
+    errores: list[str] = []
     columnas_mes = [str(m).zfill(2) for m in range(1, 13)]
     print(f"📅 [VALIDATION-INFO] Columnas mes esperadas: {columnas_mes}")
+
+    # Columnas permitidas (base) + opcionales que NO deben gatillar error:
+    # 👉 Se agrega explícitamente ItemName (y Linea) para cumplir el punto C.
+    permitidas_base = {
+        "itemcode",
+        "tipoforecast",
+        "métrica",
+        "ocrcode3",
+        "doccur",
+        "itemname",
+        "linea",  # opcionales toleradas
+    }
 
     df = df.copy()
     df.columns = df.columns.astype(str)
     print("✅ [VALIDATION-STEP] Columnas convertidas a string")
 
-    # Validación básica
+    # Aviso si viene ItemName/Linea (serán ignoradas en chequeos)
+    if any(c.lower() == "itemname" for c in df.columns):
+        print(
+            "ℹ️ [VALIDATION-INFO] Detectado 'ItemName': será ignorado por el validador (no bloquea)."
+        )
+    if any(c.lower() == "linea" for c in df.columns):
+        print(
+            "ℹ️ [VALIDATION-INFO] Detectado 'Linea': será ignorado por el validador (no bloquea)."
+        )
+
+    # Validación básica (requeridas)
     print("🔍 [VALIDATION-STEP] Validando campos requeridos...")
     campos_requeridos = ["ItemCode", "TipoForecast", "Métrica", "DocCur"]
     for col in campos_requeridos:
@@ -217,7 +239,7 @@ def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
     if "ItemCode" in df.columns:
         df["ItemCode"] = df["ItemCode"].astype(str).str.strip()
         print(
-            f"✅ [VALIDATION-INFO] ItemCode normalizado - valores únicos: {df['ItemCode'].nunique()}"
+            f"✅ [VALIDATION-INFO] ItemCode normalizado - únicos: {df['ItemCode'].nunique()}"
         )
     if "TipoForecast" in df.columns:
         df["TipoForecast"] = df["TipoForecast"].astype(str).str.strip().str.capitalize()
@@ -238,10 +260,9 @@ def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
     # Validaciones de contenido
     print("🔍 [VALIDATION-STEP] Validando contenido de columnas...")
     if "Métrica" in df.columns:
-        metricas_validas = df["Métrica"].isin(["Cantidad", "Precio"]).all()
-        if not metricas_validas:
+        if not df["Métrica"].isin(["Cantidad", "Precio"]).all():
             errores.append(
-                "La columna 'Métrica' contiene valores inválidos (solo se permite 'Cantidad' o 'Precio')."
+                "La columna 'Métrica' contiene valores inválidos (solo 'Cantidad' o 'Precio')."
             )
             print(
                 f"❌ [VALIDATION-ERROR] Valores inválidos en Métrica: {df['Métrica'].unique().tolist()}"
@@ -250,10 +271,9 @@ def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
             print("✅ [VALIDATION-OK] Métricas válidas")
 
     if "DocCur" in df.columns:
-        doccur_validos = df["DocCur"].str.match(r"^[A-Z]{3}$").all()
-        if not doccur_validos:
+        if not df["DocCur"].str.match(r"^[A-Z]{3}$").all():
             errores.append(
-                "La columna 'DocCur' debe contener solo códigos de moneda de 3 letras (ej. CLP, USD, EUR)."
+                "La columna 'DocCur' debe contener códigos de moneda de 3 letras (ej. CLP, USD, EUR)."
             )
             print(
                 f"❌ [VALIDATION-ERROR] DocCur inválidos: {df['DocCur'].unique().tolist()}"
@@ -263,30 +283,30 @@ def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
 
     # Validación de columnas mes
     print("🔍 [VALIDATION-STEP] Validando columnas mensuales...")
-    meses_faltantes = []
-    for col in columnas_mes:
-        if col not in df.columns:
-            errores.append(f"Falta la columna del mes {col}")
-            meses_faltantes.append(col)
-
+    meses_faltantes = [col for col in columnas_mes if col not in df.columns]
     if meses_faltantes:
+        errores.append(f"Faltan columnas de mes: {meses_faltantes}")
         print(f"❌ [VALIDATION-ERROR] Meses faltantes: {meses_faltantes}")
     else:
         print("✅ [VALIDATION-OK] Todas las columnas mensuales presentes")
 
     # Validación estructural extendida
     print("🔍 [VALIDATION-STEP] Validando estructura y duplicados...")
-    if {"ItemCode", "TipoForecast", "Métrica", "OcrCode3"}.issubset(df.columns):
-        duplicados = df.duplicated(
-            subset=["ItemCode", "TipoForecast", "Métrica", "OcrCode3"], keep=False
-        )
-        if duplicados.any():
-            count_duplicados = duplicados.sum()
+    clave_duplicado = ["ItemCode", "TipoForecast", "Métrica", "OcrCode3"]
+    if set(clave_duplicado).issubset(df.columns):
+        duplicados_mask = df.duplicated(subset=clave_duplicado, keep=False)
+        if duplicados_mask.any():
+            count_duplicados = int(duplicados_mask.sum())
+            ejemplos = (
+                df.loc[duplicados_mask, clave_duplicado]
+                .head(5)
+                .to_dict(orient="records")
+            )
             errores.append(
                 "Existen filas duplicadas por [ItemCode, TipoForecast, Métrica, OcrCode3]."
             )
             print(
-                f"❌ [VALIDATION-ERROR] {count_duplicados} filas duplicadas encontradas"
+                f"❌ [VALIDATION-ERROR] {count_duplicados} filas duplicadas encontradas. Ejemplos: {ejemplos}"
             )
         else:
             print("✅ [VALIDATION-OK] Sin duplicados en clave compuesta")
@@ -294,24 +314,25 @@ def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
     # Validación de columnas residuales sueltas
     print("🔍 [VALIDATION-STEP] Validando columnas residuales...")
     if "PrecioUN" in df.columns and "Métrica" in df.columns:
-        if not df[df["Métrica"] == "Precio"].empty and "PrecioUN" not in columnas_mes:
+        # Si 'Precio' existe, su granularidad debe estar en columnas mensuales, no en una suelta 'PrecioUN'
+        if not df[df["Métrica"] == "Precio"].empty:
             errores.append(
-                "La columna 'PrecioUN' no debe existir como columna suelta. Debe estar distribuida en columnas mensuales."
+                "La columna suelta 'PrecioUN' no debe existir cuando 'Métrica' = 'Precio'. Distribuir por meses."
             )
             print("❌ [VALIDATION-ERROR] Columna PrecioUN no permitida")
 
-    # Validación de columnas inesperadas
+    # Validación de columnas inesperadas (tolerando ItemName/Linea)
     print("🔍 [VALIDATION-STEP] Buscando columnas inesperadas...")
     col_extranas = [
         col
         for col in df.columns
-        if col.lower()
-        not in {"itemcode", "tipoforecast", "métrica", "ocrcode3", "doccur"}
-        and col not in columnas_mes
+        if (col.lower() not in permitidas_base) and (col not in columnas_mes)
     ]
     if col_extranas:
         errores.append(f"Columnas inesperadas detectadas: {col_extranas}")
         print(f"❌ [VALIDATION-ERROR] Columnas inesperadas: {col_extranas}")
+    else:
+        print("✅ [VALIDATION-OK] Sin columnas inesperadas (ItemName/Linea toleradas)")
 
     if errores:
         print(f"❌ [VALIDATION-END] Validación fallida con {len(errores)} errores")
@@ -322,31 +343,34 @@ def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
     df[columnas_mes] = df[columnas_mes].apply(pd.to_numeric, errors="coerce").fillna(0)
     print("✅ [VALIDATION-INFO] Columnas mensuales convertidas a numéricas")
 
-    # Validación de valores negativos
+    # Negativos en cualquiera de las métricas (Cantidad/Precio)
     print("🔍 [VALIDATION-STEP] Buscando valores negativos...")
     for col in columnas_mes:
         negativos = df[df[col] < 0]
         if not negativos.empty:
-            codigos = (
-                negativos["ItemCode"].unique().tolist()[:5]
-            )  # Mostrar solo primeros 5
+            codigos = negativos["ItemCode"].astype(str).unique().tolist()[:5]
             errores.append(f"Valores negativos en mes {col} para: {codigos}")
             print(
-                f"❌ [VALIDATION-ERROR] Valores negativos en {col}: {len(negativos)} registros"
+                f"❌ [VALIDATION-ERROR] Valores negativos en {col}: {len(negativos)} registros (ej: {codigos})"
             )
 
     # Validación TipoForecast
     print("🔍 [VALIDATION-STEP] Validando TipoForecast...")
-    if not df["TipoForecast"].isin(["Firme", "Proyectado"]).all():
+    if (
+        "TipoForecast" in df.columns
+        and not df["TipoForecast"].isin(["Firme", "Proyectado"]).all()
+    ):
         valores_invalidos = (
-            df[~df["TipoForecast"].isin(["Firme", "Proyectado"])]["TipoForecast"]
+            df.loc[~df["TipoForecast"].isin(["Firme", "Proyectado"]), "TipoForecast"]
             .unique()
             .tolist()
         )
         errores.append(
-            "TipoForecast contiene valores inválidos (solo se permite 'Firme' o 'Proyectado')."
+            "TipoForecast contiene valores inválidos (solo 'Firme' o 'Proyectado')."
         )
         print(f"❌ [VALIDATION-ERROR] TipoForecast inválidos: {valores_invalidos}")
+    else:
+        print("✅ [VALIDATION-OK] TipoForecast válidos")
 
     if errores:
         print(f"❌ [VALIDATION-END] Validación fallida con {len(errores)} errores")
