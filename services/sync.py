@@ -25,23 +25,6 @@ def hash_df(df):
     ).hexdigest()
 
 
-# B_NRM001: Normalización selectiva de columnas numéricas para hashing
-# # ∂B_NRM001/∂B0
-def _normalizar_hash(df_: pd.DataFrame) -> pd.DataFrame:
-    df_copia = df_.copy()
-    df_copia.columns = df_copia.columns.astype(str)
-
-    columnas_mes = [str(m).zfill(2) for m in range(1, 13)]
-    columnas_numericas = [c for c in columnas_mes if c in df_copia.columns]
-    if "PrecioUN" in df_copia.columns:
-        columnas_numericas.append("PrecioUN")
-
-    for col in columnas_numericas:
-        df_copia[col] = pd.to_numeric(df_copia[col], errors="coerce").fillna(0)
-
-    return df_copia.sort_index(axis=0).sort_index(axis=1)
-
-
 # B_TMP003: Guardado seguro de backup temporal (.pkl) del DataFrame de cliente
 # # ∂B_TMP003/∂B0
 def guardar_temp_local(cliente: str, df: pd.DataFrame):

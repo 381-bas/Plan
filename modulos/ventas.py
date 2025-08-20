@@ -1,11 +1,4 @@
-﻿# B_VIN001: Inicio simbiótico y dominio SCANNER para ventas.py
-# # ∂B_VIN001/∂B0
-"""
-Este archivo inicia bajo dominio total de SCANNER.
-Toda función será estructural, reversible y trazable.
-"""
-
-# B_VIN002: Importaciones fundacionales y dependencias funcionales para ventas
+﻿# B_VIN002: Importaciones fundacionales y dependencias funcionales para ventas
 # # ∂B_VIN002/∂B0
 import streamlit as st
 import pandas as pd
