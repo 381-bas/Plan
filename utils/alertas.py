@@ -10,7 +10,7 @@ from datetime import datetime
 from contextlib import closing
 
 from utils.db import run_query, DB_PATH
-from utils.utils_buffers import _refrescar_buffer_ui
+from modulos.editor_forecast import _refrescar_buffer_ui
 
 
 def evaluar_alertas(df: pd.DataFrame) -> pd.DataFrame:
