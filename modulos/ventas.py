@@ -7,21 +7,22 @@ from streamlit import column_config
 from config.contexto import obtener_anio  # ∂
 from core.consultas_forecast import (
     obtener_clientes,  # ∂B
-    obtener_forecast_editable,  # ∂B
 )
+from modulos.editor_forecast import (
+    obtener_forecast_editable,  # ∂B
+    inicializar_buffer_cliente,  # ∂B
+    sincronizar_buffer_edicion,
+    validar_forecast_dataframe,  # ∂B
+    sincronizar_buffer_local,  # ∂B
+    sincronizar_para_guardado_final,
+    guardar_todos_los_clientes_editados,
+)
+
 from utils.alertas import (
     render_alertas_forecast,
 )
 from utils.repositorio_forecast.repositorio_forecast_editor import (
     obtener_buffer_cliente,  # ∂B
-    inicializar_buffer_cliente,  # ∂B
-    validar_forecast_dataframe,  # ∂B
-    sincronizar_buffer_edicion,  # ∂B
-    sincronizar_buffer_local,  # ∂B
-)
-from utils.utils_buffers import (
-    guardar_todos_los_clientes_editados,
-    sincronizar_para_guardado_final,
 )
 from utils.db import DB_PATH
 from modulos.ventas_facturas_snippet import mostrar_facturas
