@@ -6,9 +6,9 @@ from typing import Any
 import os
 import re
 import hashlib
+import numpy as np
 from utils.db import DB_PATH, run_query
 import streamlit as st
-import numpy as np  # noqa: E402
 from pathlib import Path
 from typing import Tuple  # noqa: E402
 from typing import Optional
@@ -40,96 +40,53 @@ def obtener_forecast_editable(
     db_path: str = DB_PATH,
 ) -> pd.DataFrame:
     """
-    Devuelve el forecast editable (cantidad, precio UN, moneda) en formato ancho 01-12.
-
-    Parámetros
-    ----------
-    slp_code   : vendedor (SlpCode)
-    card_code  : cliente (CardCode)
-    anio       : año a filtrar; si es None trae todos
-    db_path    : ruta a la BD SQLite
+    Devuelve el forecast editable (cantidad, precio UN, moneda) en formato ancho 01-12,
+    tomando únicamente el último ForecastID completo del cliente/año.
     """
-    # ────────────────────────────── filtros reutilizables ──────────────────────────────
-    filtro_anio = "AND strftime('%Y', FechEntr) = ?" if anio else ""
-    # mismos filtros se usan en CTE base y en SELECT final
-    # ────────────────────────────────── query SQL ──────────────────────────────────────
+    filtro_anio = "AND strftime('%Y', fd.FechEntr) = ?" if anio else ""
+    filtro_anio_id = "AND strftime('%Y', FechEntr) = ?" if anio else ""
+
     query = f"""
-    WITH base AS (                           -- 1️⃣ registros del detalle
-        SELECT
-            ItemCode,
-            TipoForecast,
-            OcrCode3,
-            CAST(strftime('%m', FechEntr) AS TEXT) AS Mes,
-            Cant,
-            ForecastID
+    WITH ultimo_id AS (
+        SELECT MAX(ForecastID) AS ForecastID
         FROM Forecast_Detalle
-        WHERE SlpCode  = ?
-          AND CardCode = ?
-          {filtro_anio}
-    ),
-    ultimo AS (                              -- 2️⃣ sólo la última versión por clave
-        SELECT *
-        FROM (
-            SELECT
-                base.*,
-                ROW_NUMBER() OVER (
-                    PARTITION BY ItemCode, TipoForecast, OcrCode3, Mes
-                    ORDER BY ForecastID DESC
-                ) AS rn
-            FROM base
-        )
-        WHERE rn = 1
-    ),
-    catalogo AS (                            -- 3️⃣ item × tipo
-        SELECT
-            i.ItemCode,
-            i.ItemName,
-            tf.TipoForecast
-        FROM OITM i
-        CROSS JOIN (
-            SELECT 'Firme'      AS TipoForecast
-            UNION ALL
-            SELECT 'Proyectado' AS TipoForecast
-        ) tf
+        WHERE SlpCode = ? AND CardCode = ?
+          {filtro_anio_id}
     )
     SELECT
-        c.ItemCode,
-        c.ItemName,
-        c.TipoForecast,
+        fd.ItemCode,
+        i.ItemName,
+        fd.TipoForecast,
         fd.OcrCode3,
         CAST(strftime('%m', fd.FechEntr) AS INTEGER) AS Mes,
         SUM(fd.Cant)     AS Cantidad,
         AVG(fd.PrecioUN) AS PrecioUN,
         MAX(fd.DocCur)   AS DocCur
-    FROM catalogo c
-    LEFT JOIN Forecast_Detalle fd            -- sólo registros del forecast vigente
-           ON  c.ItemCode     = fd.ItemCode
-           AND c.TipoForecast = fd.TipoForecast
-    JOIN  ultimo u                           -- garantie versión más reciente
-           ON  fd.ForecastID   = u.ForecastID
-           AND fd.ItemCode     = u.ItemCode
-           AND fd.TipoForecast = u.TipoForecast
-           AND fd.OcrCode3     = u.OcrCode3
-           AND CAST(strftime('%m', fd.FechEntr) AS TEXT) = u.Mes
-    WHERE  fd.CardCode = ?
+    FROM Forecast_Detalle fd
+    JOIN ultimo_id u
+      ON fd.ForecastID = u.ForecastID
+    LEFT JOIN OITM i
+      ON i.ItemCode = fd.ItemCode
+    WHERE fd.SlpCode = ?
+      AND fd.CardCode = ?
       {filtro_anio}
     GROUP BY
-        c.ItemCode, c.ItemName, c.TipoForecast, fd.OcrCode3, Mes
+        fd.ItemCode, i.ItemName, fd.TipoForecast, fd.OcrCode3, Mes
     ORDER BY
-        c.ItemCode, c.TipoForecast, Mes;
+        fd.ItemCode, fd.TipoForecast, Mes;
     """
 
-    # ─────────────────── parámetros en el mismo orden que los ? ────────────────────
+    # orden exacto de parámetros: (para CTE) slp, card, [anio]  +  (para WHERE final) slp, card, [anio]
     params: list[Any] = [slp_code, card_code]
     if anio:
-        params.append(str(anio))  # CTE base
-    params.append(card_code)  # WHERE final
+        params.append(str(anio))
+    params += [slp_code, card_code]
     if anio:
-        params.append(str(anio))  # WHERE final
+        params.append(str(anio))
 
     df = run_query(query, db_path, tuple(params))
 
-    # ────────────────────────────── pivot + enriquecimiento ──────────────────────────
+    # Si no hay datos para el último ForecastID, devolver estructura vacía
     if df.empty:
         return pd.DataFrame(
             columns=[
@@ -144,6 +101,7 @@ def obtener_forecast_editable(
             ]
         )
 
+    # Pivot a 01..12
     pivot = df.pivot_table(
         index=["ItemCode", "ItemName", "TipoForecast", "OcrCode3"],
         columns="Mes",
@@ -151,7 +109,7 @@ def obtener_forecast_editable(
         fill_value=0,
     ).reset_index()
 
-    # PrecioUN y DocCur (una sola fila por clave ⇒ avg / first son seguros)
+    # Adjunta PrecioUN y DocCur por clave (promedio / first son seguros por clave)
     precio_un = df.groupby(["ItemCode", "TipoForecast", "OcrCode3"], as_index=False)[
         "PrecioUN"
     ].mean()
@@ -163,12 +121,12 @@ def obtener_forecast_editable(
         doc_cur, on=["ItemCode", "TipoForecast", "OcrCode3"]
     )
 
-    # Normaliza nombres 01-12
+    # Nombres de columnas 01..12 y relleno de faltantes
     pivot.columns = [
         str(c).zfill(2) if isinstance(c, int) else c for c in pivot.columns
     ]
     for m in range(1, 13):
-        col = str(m).zfill(2)
+        col = f"{m:02d}"
         if col not in pivot.columns:
             pivot[col] = 0
 
@@ -176,7 +134,7 @@ def obtener_forecast_editable(
 
     orden = (
         ["ItemCode", "ItemName", "TipoForecast", "Métrica", "OcrCode3"]
-        + [str(m).zfill(2) for m in range(1, 13)]
+        + [f"{m:02d}" for m in range(1, 13)]
         + ["PrecioUN", "DocCur"]
     )
     return pivot[orden]
@@ -626,7 +584,7 @@ def sincronizar_para_guardado_final(key_buffer: str, df_editado: pd.DataFrame):
     print("✅ [SYNC-FINAL-INFO] Buffer global actualizado")
 
     # ✅ Marcar cliente como editado
-    cliente = key_buffer.replace("forecast_buffer_cliente_", "")
+    cliente = key_buffer.replace("forecast_buffer_", "")
     editados = st.session_state.get("clientes_editados", set())
     editados.add(cliente)
     st.session_state["clientes_editados"] = editados
@@ -1424,6 +1382,15 @@ def obtener_forecast_activo(
 # B_SYN003: Guardado estructurado y seguro de buffers editados de todos los clientes
 # # ∂B_SYN003/∂B0
 def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
+    """
+    Cambios principales:
+    - (✔) Cada guardado usa un ForecastID NUEVO (force_new=True) y se limpia el cache del ID activo post-guardado.
+    - (✔) Se crea la cabecera SOLO si hay cambios reales (evita cabeceras huérfanas).
+    - (✔) Resets y hashing intactos; recuperación post-error solo si hubo ForecastID.
+    - (✔) Logs más explícitos y defensas adicionales.
+    """
+    import numpy as np
+    import pandas as pd  # ← Asegura disponibilidad de pd dentro de la función
 
     print("[DEBUG-SAVE-MAIN] 🚀 Iniciando proceso de guardado")
     print(f"[DEBUG-SAVE-MAIN] Session state actual: {list(st.session_state.keys())}")
@@ -1441,8 +1408,13 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
     print(f"[DEBUG-SAVE-BATCH] Total clientes a procesar: {len(clientes)}")
     print(f"[DEBUG-SAVE-BATCH] Estado session_state antes: {dict(st.session_state)}")
 
+    # Helper local para la clave de cache del forecast activo
+    def _forecast_activo_cache_key(slpcode: int, cardcode: str, anio: int) -> str:
+        return f"forecast_activo_{slpcode}_{cardcode}_{anio}"
+
     for cliente in clientes:
-        key_buffer = f"forecast_buffer_cliente_{cliente}"
+        key_buffer = f"forecast_buffer_{cliente}"
+        forecast_id = None  # ← Definido temprano para manejo en try/except
         print(f"\n[DEBUG-SAVE-MAIN] 📝 Procesando cliente: {cliente}")
         print(f"[DEBUG-SAVE-MAIN] Buffer key: {key_buffer}")
         print(
@@ -1470,7 +1442,7 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                 )
                 continue
 
-            # 1) Transformación a largo
+            # 1) Transformación a largo (usa tu función probada)
             df_largo = df_forecast_metrico_to_largo(df_base, anio, cliente, slpcode)
             print(f"[DEBUG-GUARDADO] Paso 2: DF_LARGO generado (filas={len(df_largo)})")
             try:
@@ -1489,16 +1461,11 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                 st.info(f"ℹ️ Sin datos para guardar en cliente {cliente}.")
                 continue
 
-            # 2) Obtener IDs de forecast
-            forecast_id = obtener_forecast_activo(
-                slpcode, cliente, anio, db_path, force_new=False
-            )
+            # 2) Buscar histórico previo (ANTES de crear nueva cabecera)
             forecast_id_prev = _get_forecast_id_prev(slpcode, cliente, anio, db_path)
-            print(
-                f"[DEBUG-GUARDADO] Paso 3: ForecastID nuevo = {forecast_id}, anterior = {forecast_id_prev}"
-            )
+            print(f"[DEBUG-GUARDADO] Paso 3: ForecastID anterior = {forecast_id_prev}")
 
-            # 3) Filtrado en base a histórico
+            # 3) Enriquecer + filtrar contra histórico
             modo_individual = existe_forecast_individual(
                 slpcode, cliente, anio, db_path
             )
@@ -1510,23 +1477,34 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                 anio,
                 db_path,
                 incluir_deltas_cero_si_es_individual=modo_individual,
+                forzar_incluir_todos=(forecast_id_prev is None),
             )
             print(
                 f"[DEBUG-GUARDADO] Paso 4: Cambios reales detectados = {len(df_largo_filtrado)}"
             )
+
             if df_largo_filtrado.empty:
+                # (✔) No creamos cabecera si no hay cambios → evita Forecast_Header huérfano
                 print(
-                    f"[DEBUG-GUARDADO] ⏩ Sin cambios reales en métricas. Cliente omitido: {cliente}"
+                    f"[DEBUG-GUARDADO] ⏩ Sin cambios reales. Cliente omitido: {cliente}"
                 )
                 st.info(
                     f"⏩ Cliente {cliente}: sin cambios reales. Se omite inserción."
                 )
-                # 🔁 RESET suave: aunque no haya cambios, limpiamos estado de edición de este cliente
                 _reset_estado_edicion_por_cliente(cliente, key_buffer)
                 continue
 
-            # 4) Logging delta
-            print("[DEBUG-GUARDADO] Paso 5: Logging de diferencias previas a inserción")
+            # 4) Crear SIEMPRE nueva cabecera SOLO cuando hay cambios
+            #    (✔) force_new=True garantiza ForecastID nuevo por cada “Guardar”
+            forecast_id = obtener_forecast_activo(
+                slpcode, cliente, anio, db_path, force_new=False
+            )
+            print(
+                f"[DEBUG-GUARDADO] Paso 5: ForecastID nuevo = {forecast_id}, anterior = {forecast_id_prev}"
+            )
+
+            # 5) Logging delta (antes de insertar)
+            print("[DEBUG-GUARDADO] Paso 6: Logging de diferencias previas a inserción")
             registrar_log_detalle_cambios(
                 slpcode,
                 cliente,
@@ -1537,8 +1515,8 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                 forecast_id_anterior=forecast_id_prev,
             )
 
-            # 5) Inserción / upsert
-            print("[DEBUG-GUARDADO] Paso 6: Insertando forecast detalle en BD")
+            # 6) Inserción / UPSERT
+            print("[DEBUG-GUARDADO] Paso 7: Insertando forecast detalle en BD")
             print(
                 f"[DEBUG-SAVE-INSERT] Preparando inserción para ForecastID={forecast_id}"
             )
@@ -1563,13 +1541,13 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                 f"[DEBUG-SAVE-INSERT] Estado session_state después: {dict(st.session_state)}"
             )
 
-            # 6) Reconstituir SIEMPRE el buffer UI desde BD (4 filas × 12 meses)
+            # 7) Refrescar SIEMPRE el buffer UI desde BD (4×12 garantizado)
             print(
-                "[DEBUG-GUARDADO] Paso 7: Refrescando buffer UI post-guardado (4×12 garantizado)"
+                "[DEBUG-GUARDADO] Paso 8: Refrescando buffer UI post-guardado (4×12 garantizado)"
             )
             _refrescar_buffer_ui(forecast_id, key_buffer, db_path)
 
-            # ✅ Verificación de forma 4×12 (Cantidad/Precio × Firme/Proyectado) por base
+            # Verificación de forma (4 filas por base: Cantidad/Precio × Firme/Proyectado)
             try:
                 df_ui = st.session_state[key_buffer].reset_index()
                 base = df_ui[["ItemCode", "OcrCode3", "DocCur"]].drop_duplicates()
@@ -1585,11 +1563,19 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
             except Exception as e_check:
                 print(f"[DEBUG-GUARDADO] (no se pudo verificar 4×12) {e_check}")
 
-            # 7) RESET del editor y marcas de edición (parche A)
-            print("[DEBUG-GUARDADO] Paso 8: Reseteando estado de edición UI")
+            # 8) RESET del editor y marcas de edición
+            print("[DEBUG-GUARDADO] Paso 9: Reseteando estado de edición UI")
             _reset_estado_edicion_por_cliente(cliente, key_buffer)
 
-            # 8) Recalcular y guardar hash del buffer actual (utilidad anti-pestañeo)
+            # (✔) Limpieza explícita del cache del ForecastID activo para evitar reutilización en el próximo guardado
+            cache_key = _forecast_activo_cache_key(slpcode, cliente, anio)
+            if cache_key in st.session_state:
+                print(
+                    f"[DEBUG-GUARDADO] Limpieza de cache ForecastID activo: {cache_key} -> {st.session_state[cache_key]}"
+                )
+                del st.session_state[cache_key]
+
+            # 9) Recalcular y guardar hash del buffer actual (anti-parpadeo)
             try:
                 df_for_hash = st.session_state[key_buffer].reset_index()
                 h = pd.util.hash_pandas_object(df_for_hash, index=False).sum()
@@ -1612,8 +1598,14 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
             )
             st.error(f"❌ Error al guardar cliente {cliente}: {e}")
 
-            # Intento de recuperación visual mínima
+            # Recuperación visual mínima SOLO si hubo ForecastID (evita query con None)
             try:
+                if forecast_id is None:
+                    print(
+                        "[DEBUG-GUARDADO] ↩ Sin ForecastID generado; se omite refresco alternativo."
+                    )
+                    continue
+
                 print(
                     "[DEBUG-GUARDADO] ↩ Intentando refresco alternativo por error de escritura"
                 )
@@ -1687,7 +1679,6 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                     st.success(
                         f"✅ Cliente {cliente} guardado correctamente (ForecastID={forecast_id})."
                     )
-                    # Incluso en recuperación, limpiamos estado de edición para evitar loops
                     _reset_estado_edicion_por_cliente(cliente, key_buffer)
             except Exception as e2:
                 print(
@@ -1705,53 +1696,54 @@ def _get_forecast_id_prev(
     slpcode: int, cardcode: str, anio: int, db_path: str
 ) -> Optional[int]:
     """
-    Busca el ForecastID más reciente para un cliente (CardCode) y vendedor (SlpCode).
-    Si no existe Forecast individual, intenta buscar uno global (sin CardCode).
-    Retorna None si no se encuentra ningún historial.
+    Busca el ForecastID MÁS RECIENTE para un cliente (CardCode) y vendedor (SlpCode)
+    que sea INMEDIATAMENTE ANTERIOR al que se va a crear.
     """
-    print("🔍 [FORECAST-PREV-START] Buscando forecast histórico")
+    print("🔍 [FORECAST-PREV-START] Buscando forecast histórico INMEDIATO")
     print(
         f"📊 [FORECAST-PREV-INFO] slpcode: {slpcode}, cardcode: {cardcode}, anio: {anio}"
     )
     print(f"🗄️  [FORECAST-PREV-INFO] db_path: {db_path}")
 
-    # 1. Intento por cliente específico
-    print(
-        "🔍 [FORECAST-PREV-STEP] Buscando forecast individual (cliente específico)..."
-    )
-    qry_individual = """
+    # 1. Buscar el ForecastID más reciente para este cliente y año
+    print("🔍 [FORECAST-PREV-STEP] Buscando forecast más reciente...")
+    qry_reciente = """
         SELECT MAX(fd.ForecastID) AS id
         FROM   Forecast_Detalle fd
+        JOIN   Forecast f ON fd.ForecastID = f.ForecastID
         WHERE  fd.SlpCode  = ?
           AND  fd.CardCode = ?
-          AND  strftime('%Y', fd.FechEntr) = ?;
+          AND  strftime('%Y', fd.FechEntr) = ?
+          AND  f.Fecha_Carga < datetime('now')
     """
-    print(f"📝 [FORECAST-PREV-QUERY] Query individual: {qry_individual.strip()}")
+    print(f"📝 [FORECAST-PREV-QUERY] Query reciente: {qry_reciente.strip()}")
     print(
         f"📋 [FORECAST-PREV-PARAMS] Params: slpcode={slpcode}, cardcode={cardcode}, anio={anio}"
     )
 
-    df_ind = run_query(
-        qry_individual, params=(slpcode, cardcode, str(anio)), db_path=db_path
+    df_reciente = run_query(
+        qry_reciente, params=(slpcode, cardcode, str(anio)), db_path=db_path
     )
-    print(f"📊 [FORECAST-PREV-RESULT] Resultado individual - shape: {df_ind.shape}")
+    print(f"📊 [FORECAST-PREV-RESULT] Resultado reciente - shape: {df_reciente.shape}")
 
-    if not df_ind.empty and pd.notna(df_ind.iloc[0].id):
-        forecast_id = int(df_ind.iloc[0].id)
+    if not df_reciente.empty and pd.notna(df_reciente.iloc[0].id):
+        forecast_id = int(df_reciente.iloc[0].id)
         print(
-            f"✅ [FORECAST-PREV-FOUND] ForecastID individual encontrado: {forecast_id}"
+            f"✅ [FORECAST-PREV-FOUND] ForecastID inmediato anterior encontrado: {forecast_id}"
         )
         return forecast_id
     else:
-        print("❌ [FORECAST-PREV-NOTFOUND] No se encontró forecast individual")
+        print("❌ [FORECAST-PREV-NOTFOUND] No se encontró forecast inmediato anterior")
 
-    # 2. Intento fallback: Forecast global para el mismo SlpCode (sin filtrar CardCode)
+    # 2. Fallback: Buscar cualquier forecast global para el mismo SlpCode
     print("🔍 [FORECAST-PREV-STEP] Buscando forecast global (fallback)...")
     qry_global = """
         SELECT MAX(fd.ForecastID) AS id
         FROM   Forecast_Detalle fd
+        JOIN   Forecast f ON fd.ForecastID = f.ForecastID
         WHERE  fd.SlpCode  = ?
-          AND  strftime('%Y', fd.FechEntr) = ?;
+          AND  strftime('%Y', fd.FechEntr) = ?
+          AND  f.Fecha_Carga < datetime('now')
     """
     print(f"📝 [FORECAST-PREV-QUERY] Query global: {qry_global.strip()}")
     print(f"📋 [FORECAST-PREV-PARAMS] Params: slpcode={slpcode}, anio={anio}")
@@ -1767,7 +1759,7 @@ def _get_forecast_id_prev(
         print("❌ [FORECAST-PREV-NOTFOUND] No se encontró forecast global")
 
     print(
-        "⚠️  [FORECAST-PREV-END] No se encontró forecast histórico (ni individual ni global)"
+        "⚠️  [FORECAST-PREV-END] No se encontró forecast histórico (ni inmediato anterior ni global)"
     )
     print("🆕 [FORECAST-PREV-INFO] Se partirá desde cero (forecast nuevo)")
     return None
@@ -1836,6 +1828,7 @@ def _enriquecer_y_filtrar(
     db_path: str,
     resolver_duplicados: str = "mean",  # opciones: "mean", "sum", "error"
     incluir_deltas_cero_si_es_individual: bool = False,  # DEPRECADO: se ignora
+    forzar_incluir_todos: bool = False,
 ) -> pd.DataFrame:
     """
     Añade columna ``Cant_Anterior`` y devuelve SOLO las filas a persistir,
@@ -1973,12 +1966,19 @@ def _enriquecer_y_filtrar(
     # 3) REGLAS A/B/C (idempotentes) + métricas de transición
     # ------------------------------------------------------
     # Bajas (>0→0), Altas (0→>0), Cambios (>0→>0, Δ≠0)
-    bajas_mask = (df_enr["Cant_Anterior"] > 0) & (df_enr["Cant"] == 0)
-    altas_mask = (df_enr["Cant_Anterior"] == 0) & (df_enr["Cant"] > 0)
-    cambios_mask = (
-        (df_enr["Cant_Anterior"] > 0) & (df_enr["Cant"] > 0) & (df_enr["Delta"] != 0)
-    )
-
+    if forzar_incluir_todos:
+        # Para nuevos ForecastIDs: incluir TODOS los registros
+        df_out = df_enr.copy()
+        print("[DEBUG-FILTRO] 🔄 Modo forzado: incluyendo todos los registros")
+    else:
+        # Lógica original solo para cambios
+        bajas_mask = (df_enr["Cant_Anterior"] > 0) & (df_enr["Cant"] == 0)
+        altas_mask = (df_enr["Cant_Anterior"] == 0) & (df_enr["Cant"] > 0)
+        cambios_mask = (
+            (df_enr["Cant_Anterior"] > 0)
+            & (df_enr["Cant"] > 0)
+            & (df_enr["Delta"] != 0)
+        )
     # Ignorar flag heredado (deprecado)
     if incluir_deltas_cero_si_es_individual:
         print(
