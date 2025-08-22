@@ -115,7 +115,7 @@ def vista_forecast(slpcode, cardcode):
     # Continuar después de obtener df_forecast
     # -----------------------------------------------------------------
     # 4️⃣  ───────────  Buffer de sesión (DataFrame completo)  ───────────
-    key_buffer = f"forecast_buffer_cliente_{cardcode}"
+    key_buffer = f"forecast_buffer_{cardcode}"
     if key_buffer not in st.session_state:
         inicializar_buffer_cliente(key_buffer, df_forecast)
 

@@ -8,7 +8,7 @@ from config.contexto import obtener_mes
 # B_BUF002: Generación de clave única de buffer para cliente
 # # ∂B_BUF002/∂B0
 def get_key_buffer(cliente: str) -> str:
-    return f"forecast_buffer_cliente_{cliente}"
+    return f"forecast_buffer_{cliente}"
 
 
 # B_BUF004: Obtención del DataFrame del buffer de cliente desde sesión
