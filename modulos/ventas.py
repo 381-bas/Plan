@@ -8,6 +8,11 @@ from config.contexto import obtener_anio  # ∂
 from core.consultas_forecast import (
     obtener_clientes,  # ∂B
 )
+
+# modulos/ventas.py (arriba, imports)
+from core.historico import vista_historico
+from core.stock import vista_stock
+
 from modulos.editor_forecast import (
     obtener_forecast_editable,  # ∂B
     inicializar_buffer_cliente,  # ∂B
@@ -177,7 +182,7 @@ def vista_forecast(slpcode, cardcode):
         col = f"{mes:02d}"
         column_config_forecast[col] = column_config.NumberColumn(
             label=col,
-            disabled=mes <= 6,  # bloqueo hasta junio
+            disabled=mes <= 7,  # bloqueo hasta julio
         )
 
     df_editado = st.data_editor(
@@ -277,20 +282,6 @@ def vista_forecast(slpcode, cardcode):
             except Exception as e:
                 print(f"[ERROR-SAVE] Error durante el guardado: {str(e)}")
                 st.error(f"❌ Error durante el guardado: {e}")
-
-
-# B_STK001: Visualización de stock disponible para cliente/usuario
-# # ∂B_STK001/∂B0
-def vista_stock(slpcode, cardcode):
-    st.markdown("### 📦 Stock disponible")
-    st.info("Aquí se mostrará el stock actual por SKU.")
-
-
-# B_HST001: Visualización de ventas históricas para cliente/usuario
-# # ∂B_HST001/∂B0
-def vista_historico(slpcode, cardcode):
-    st.markdown("### 📈 Ventas Históricas")
-    st.info("Aquí se mostrarán las ventas.")
 
 
 # B_AYD001: Visualización de ayuda e instrucciones para el usuario
