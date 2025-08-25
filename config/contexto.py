@@ -82,15 +82,50 @@ def set_rol(rol):
 def asignar_usuario_desde_sesion(vendedor_param):
     """
     Asigna automáticamente un usuario si viene desde query_params (?vendedor=123)
+    Logs: [RUN.INFO]/[RUN.WARN] en una sola línea, sin emojis.
+    Retorna: (slp:int|None, changed:bool)
     """
-    print(
-        f"[DEBUG] 🔁 asignar_usuario_desde_sesion ejecutado con vendedor = {vendedor_param}"
-    )
+    raw = None if vendedor_param is None else str(vendedor_param).strip()
+    if not raw:
+        print("[RUN.INFO] asignar_usuario_desde_sesion — vendedor=None set=False")
+        return None, False
 
-    if vendedor_param:
-        st.session_state["usuario"] = f"Vendedor_{vendedor_param}"
-        st.session_state["SlpCode"] = int(vendedor_param)
-        st.session_state["rol"] = "ventas"
+    try:
+        slp = int(raw)
+    except (ValueError, TypeError):
+        print(
+            f"[RUN.WARN] asignar_usuario_desde_sesion — vendedor={raw!r} invalido set=False"
+        )
+        return None, False
+
+    if slp <= 0:
+        print(
+            f"[RUN.WARN] asignar_usuario_desde_sesion — vendedor={slp} invalido(<=0) set=False"
+        )
+        return None, False
+
+    # Evitar escrituras redundantes en session_state:
+    prev = (
+        st.session_state.get("usuario"),
+        st.session_state.get("SlpCode"),
+        st.session_state.get("rol"),
+    )
+    target = (f"Vendedor_{slp}", slp, "ventas")
+
+    if prev == target:
+        print(
+            f"[RUN.INFO] asignar_usuario_desde_sesion — vendedor={slp} set=reuse usuario=Vendedor_{slp} slpcode={slp} rol=ventas"
+        )
+        return slp, False
+
+    st.session_state["usuario"] = target[0]
+    st.session_state["SlpCode"] = target[1]
+    st.session_state["rol"] = target[2]
+
+    print(
+        f"[RUN.INFO] asignar_usuario_desde_sesion — vendedor={slp} set=True usuario=Vendedor_{slp} slpcode={slp} rol=ventas"
+    )
+    return slp, True
 
 
 # B_CTX012: Accesor para obtener usuario actual (fallback)
@@ -107,8 +142,17 @@ def obtener_rol_actual():
 
 # B_CTX014: Accesor para obtener SlpCode actual (fallback)
 # # ∂B_CTX014/∂B0
-def obtener_slpcode():
-    return st.session_state.get("SlpCode", 0)  # ✅ corregido a mayúscula
+def obtener_slpcode() -> int:
+    """Devuelve SlpCode como int desde session_state. Log solo si falta o es inválido."""
+    val = st.session_state.get("SlpCode", None)  # ✅ mayúscula
+    if val in (None, ""):
+        print("[SESSION.WARN] obtener_slpcode — not set -> 0")
+        return 0
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        print(f"[SESSION.WARN] obtener_slpcode — invalid={val!r} -> 0")
+        return 0
 
 
 # B_CTX015: Configuración manual de usuario, SlpCode y rol (para pruebas o backdoor)

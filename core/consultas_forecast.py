@@ -33,18 +33,102 @@ def obtener_clientes(slpcode, db_path=DB_PATH):
 
 # B_FCS004: Obtener forecast histórico detallado por vendedor y cliente
 # # ∂B_FCS004/∂B0
-def obtener_forecast_historico(slp_code, card_code, db_path=DB_PATH):
-    query = """
-    SELECT f.Fecha_Carga, fd.FechEntr, fd.ItemCode, i.ItemName,
-           fd.TipoForecast, fd.Cant
-    FROM Forecast f
-    JOIN Forecast_Detalle fd ON f.ForecastID = fd.ForecastID
-    LEFT JOIN OITM i ON fd.ItemCode = i.ItemCode
-    WHERE f.SlpCode = ? AND fd.CardCode = ?
-      AND UPPER(fd.TipoForecast) IN ('FIRME', 'PROYECTADO')
-    ORDER BY fd.FechEntr
+def obtener_forecast_historico(
+    slpcode: int, cardcode: str, db_path: str = DB_PATH
+) -> pd.DataFrame:
     """
-    return run_query(query, db_path, (slp_code, card_code))
+    Historiza forecast (Firme/Proyectado) para un vendedor+cliente.
+    - Logs compactos [HIST.*] sin emojis.
+    - Usa run_query(sql, params=(), db_path=None).
+    - Normaliza dtypes y títulos de TipoForecast.
+    """
+    import time
+
+    t0 = time.perf_counter()
+
+    print(f"[HIST.INFO] start slpcode={slpcode} cardcode={cardcode}")
+
+    sql = """
+        SELECT
+            f.Fecha_Carga,
+            fd.FechEntr,
+            fd.ItemCode,
+            i.ItemName,
+            fd.TipoForecast,
+            fd.Cant
+        FROM Forecast f
+        JOIN Forecast_Detalle fd ON f.ForecastID = fd.ForecastID
+        LEFT JOIN OITM i ON fd.ItemCode = i.ItemCode
+        WHERE f.SlpCode = ?
+          AND fd.CardCode = ?
+          AND UPPER(fd.TipoForecast) IN ('FIRME','PROYECTADO')
+        ORDER BY fd.FechEntr, f.Fecha_Carga
+    """
+
+    expected_cols = [
+        "Fecha_Carga",
+        "FechEntr",
+        "ItemCode",
+        "ItemName",
+        "TipoForecast",
+        "Cant",
+    ]
+
+    try:
+        df = run_query(sql, params=(slpcode, cardcode), db_path=db_path)
+    except Exception as e:
+        print(
+            f"[HIST.ERROR] query_fail slpcode={slpcode} cardcode={cardcode} err={e.__class__.__name__}: {e}"
+        )
+        return pd.DataFrame(columns=expected_cols)
+
+    if df is None or df.empty:
+        print(f"[HIST.INFO] empty rows=0 elapsed={time.perf_counter()-t0:.3f}s")
+        return pd.DataFrame(columns=expected_cols)
+
+    # Asegurar columnas esperadas si el motor devuelve nombres distintos/orden
+    for c in expected_cols:
+        if c not in df.columns:
+            df[c] = pd.Series(dtype="float64" if c == "Cant" else "object")
+
+    # Normalizaciones
+    df["Fecha_Carga"] = pd.to_datetime(df["Fecha_Carga"], errors="coerce")
+    df["FechEntr"] = pd.to_datetime(df["FechEntr"], errors="coerce")
+    df["Cant"] = pd.to_numeric(df["Cant"], errors="coerce").fillna(0.0)
+    df["TipoForecast"] = (
+        df["TipoForecast"]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .map({"firme": "Firme", "proyectado": "Proyectado"})
+        .fillna("Firme")
+    )
+
+    # Diagnóstico
+    dups_key = ["ItemCode", "TipoForecast", "FechEntr"]
+    dups_count = int(df.duplicated(dups_key, keep=False).sum())
+    tipos_dist = df["TipoForecast"].value_counts(dropna=False).to_dict()
+    items_n = int(df["ItemCode"].nunique())
+    fe_min = df["FechEntr"].min()
+    fe_max = df["FechEntr"].max()
+    fe_range = (
+        f"{fe_min.date()}..{fe_max.date()}"
+        if pd.notna(fe_min) and pd.notna(fe_max)
+        else "nan..nan"
+    )
+
+    print(
+        f"[HIST.INFO] rows={len(df)} items={items_n} tipos={tipos_dist} "
+        f"range={fe_range} dups_on_key={dups_count}"
+    )
+
+    # Orden estable para consumidores aguas abajo
+    df = df.sort_values(
+        ["FechEntr", "Fecha_Carga", "ItemCode", "TipoForecast"]
+    ).reset_index(drop=True)
+
+    print(f"[HIST.INFO] end rows={len(df)} elapsed={time.perf_counter()-t0:.3f}s")
+    return df[expected_cols]
 
 
 # B_FCS006: Consulta de stock disponible para lista de ítems

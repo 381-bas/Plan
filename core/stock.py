@@ -294,8 +294,10 @@ def _chart_barras_mensual(
 # Vista principal
 # ──────────────────────────────────────────────────────────────────────────────
 def vista_stock(
-    slpcode: int, _unused=None
-) -> None:  # slpcode intencionalmente ignorado
+    slpcode: int, _unused=None  # slpcode intencionalmente ignorado
+) -> None:
+    print(f"[STOCK.INFO] start slpcode={slpcode}")
+
     st.markdown("### 🧱 Stock — detalle por ítem / bodega / lote")
 
     # Filtros dependientes (Item ⟷ Bodega) + Grupo + Lote
@@ -309,6 +311,11 @@ def vista_stock(
         _bodegas_para_item(sel_item_prev) if sel_item_prev else _obtener_bodegas_stock()
     )
     grupos_src = _obtener_grupos()
+
+    print(
+        f"[STOCK.INFO] src items_shape={getattr(items_src,'shape',None)} "
+        f"bodegas_shape={getattr(bodegas_src,'shape',None)} grupos_shape={getattr(grupos_src,'shape',None)}"
+    )
 
     # Mapping para format_func seguros
     items_map: Dict[str, str] = dict(
@@ -356,6 +363,9 @@ def vista_stock(
 
     # Lotes disponibles tras aplicar item/bodega
     lotes_src = _lotes_disponibles(itemcode, whscode)
+    print(
+        f"[STOCK.INFO] filtros_pre lotes_rows={len(lotes_src) if lotes_src is not None else 0}"
+    )
     with col_f4:
         lote_opts: List[Optional[str]] = [None] + lotes_src["Lote"].dropna().astype(
             str
@@ -370,11 +380,17 @@ def vista_stock(
             key="lote_selectbox_stock",
         )
 
+    print(
+        f"[STOCK.INFO] filtros item={itemcode} whs={whscode} grupo={grupo} lote={lote}"
+    )
+
     # Tabla
     df = _obtener_base(itemcode, whscode, grupo, lote)
+    print(f"[STOCK.INFO] result shape={getattr(df,'shape',None)}")
     st.dataframe(df, use_container_width=True, hide_index=True)
 
     if df.empty:
+        print("[STOCK.INFO] result empty -> return")
         st.info("No hay registros para los filtros seleccionados.")
         return
 
@@ -383,10 +399,13 @@ def vista_stock(
     # ──────────────────────────────────────────────────────────────────────────
     c1, c2, c3 = st.columns(3)
 
-    # 1) Vencimiento mensual (usa FechaVenc y Stock_Lote; si no hay fechas, se oculta)
+    # 1) Vencimiento mensual
     with c1:
         venc_series = _serie_mensual(
             df[["FechaVenc", "Stock_Lote"]], "FechaVenc", "Stock_Lote"
+        )
+        print(
+            f"[STOCK.INFO] chart.venc_mensual rows={0 if venc_series is None else len(venc_series)}"
         )
         if venc_series.empty:
             st.caption("Sin fechas de vencimiento para los filtros actuales.")
@@ -401,13 +420,14 @@ def vista_stock(
                 use_container_width=True,
             )
 
-    # 2) Stock por bodega (barra horizontal)
+    # 2) Stock por bodega
     with c2:
         por_bodega = (
             df.groupby(["WhsName"], as_index=False)["Stock_Total"]
             .sum()
             .sort_values("Stock_Total", ascending=False)
         )
+        print(f"[STOCK.INFO] chart.por_bodega rows={len(por_bodega)}")
         bars = (
             alt.Chart(por_bodega)
             .mark_bar()
@@ -432,10 +452,11 @@ def vista_stock(
         )
         st.altair_chart(alt.layer(bars, labels), use_container_width=True)
 
-    # 3) Participación por grupo de ítems (porcentaje)
+    # 3) Participación por grupo
     with c3:
         por_grupo = df.groupby(["ItmsGrpNam"], as_index=False)["Stock_Total"].sum()
         total = por_grupo["Stock_Total"].sum()
+        print(f"[STOCK.INFO] chart.por_grupo rows={len(por_grupo)} total_stock={total}")
         if total > 0:
             por_grupo["Share"] = por_grupo["Stock_Total"] / total
         else:
