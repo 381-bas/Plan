@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 import altair as alt
-
+from core.historico import _serie_mensual_hist
 from utils.db import run_query, DB_PATH
 
 
@@ -189,42 +189,6 @@ MESES_ES = {
 }
 
 
-def _rango_mensual(df_dates: pd.Series) -> pd.DatetimeIndex:
-    fechas = pd.to_datetime(df_dates, errors="coerce").dropna()
-    if fechas.empty:
-        hoy = pd.Timestamp.today().normalize()
-        return pd.date_range(
-            hoy.replace(month=1, day=1), hoy.replace(month=12, day=1), freq="MS"
-        )
-    anios = sorted(fechas.dt.year.unique())
-    if len(anios) == 1:
-        y = anios[0]
-        start = pd.Timestamp(year=y, month=1, day=1)
-        end = pd.Timestamp(year=y, month=12, day=1)
-    else:
-        y0, y1 = anios[-2], anios[-1]
-        start = pd.Timestamp(year=y0, month=1, day=1)
-        end = pd.Timestamp(year=y1, month=12, day=1)
-    return pd.date_range(start, end, freq="MS")
-
-
-def _serie_mensual(df: pd.DataFrame, date_col: str, value_col: str) -> pd.DataFrame:
-    df = df.copy()
-    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-    df = df[df[date_col].notna()]
-    if df.empty:
-        return pd.DataFrame(columns=["Periodo", value_col, "Year", "MonthAbbr"])
-    df["Periodo"] = df[date_col].dt.to_period("M").dt.to_timestamp()
-    idx = _rango_mensual(df[date_col])
-    ser = (
-        df.groupby("Periodo", as_index=True)[value_col].sum().reindex(idx, fill_value=0)
-    )
-    out = ser.reset_index().rename(columns={"index": "Periodo", value_col: value_col})
-    out["Year"] = out["Periodo"].dt.year.astype(int)
-    out["MonthAbbr"] = out["Periodo"].dt.month.map(MESES_ES)
-    return out
-
-
 def _labels_de_anio_tiempo(df_mensual: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for y, sub in df_mensual.groupby("Year"):
@@ -401,7 +365,7 @@ def vista_stock(
 
     # 1) Vencimiento mensual
     with c1:
-        venc_series = _serie_mensual(
+        venc_series = _serie_mensual_hist(
             df[["FechaVenc", "Stock_Lote"]], "FechaVenc", "Stock_Lote"
         )
         print(

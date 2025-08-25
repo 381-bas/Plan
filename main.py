@@ -6,7 +6,10 @@ import streamlit as st
 from config.contexto import asignar_usuario_desde_sesion, set_usuario_manual
 from utils.logs.log_operativo import registrar_log_accion
 from config.router import cargar_modulo_si_valido
+from session_utils import normalize_slpcode_session, get_slpcode
 
+normalize_slpcode_session()
+slp = get_slpcode()
 
 # B_UIX001: Configuración visual inicial y aplicación de estilo base (blanco y negro)
 # # ∂B_UIX001/∂B0
@@ -74,20 +77,20 @@ if vendedor:
 if not modulo:
     if st.session_state.get("rol") == "ventas":
         # 🧠 Usar siempre la clave correcta y forzar asignación si SlpCode está en default
-        slpcode = st.session_state.get("SlpCode", 999)
+        SlpCode = st.session_state.get("SlpCode", 999)
 
-        if slpcode == 999:
+        if SlpCode == 999:
             # 🚨 Detectamos que no hay SlpCode real, intentamos corregir desde query param o abortamos
             vendedor_param = params.get("vendedor")
             if vendedor_param:
                 asignar_usuario_desde_sesion(vendedor_param)
-                slpcode = st.session_state.get("SlpCode", 999)
+                SlpCode = st.session_state.get("SlpCode", 999)
             else:
                 st.warning(
                     "⚠️ No se pudo detectar un SlpCode válido. Usando modo prueba."
                 )
 
-        st.query_params.update(modulo="ventas", vendedor=slpcode)
+        st.query_params.update(modulo="ventas", vendedor=SlpCode)
     else:
         st.query_params.update(modulo="inicio")
     st.rerun()

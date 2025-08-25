@@ -55,7 +55,8 @@ def obtener_forecast_historico(
             fd.ItemCode,
             i.ItemName,
             fd.TipoForecast,
-            fd.Cant
+            fd.Cant,
+            fd.PrecioUN  -- Agregado el campo de precio
         FROM Forecast f
         JOIN Forecast_Detalle fd ON f.ForecastID = fd.ForecastID
         LEFT JOIN OITM i ON fd.ItemCode = i.ItemCode
@@ -72,6 +73,7 @@ def obtener_forecast_historico(
         "ItemName",
         "TipoForecast",
         "Cant",
+        "PrecioUN",  # Agregada la columna esperada
     ]
 
     try:
@@ -89,12 +91,17 @@ def obtener_forecast_historico(
     # Asegurar columnas esperadas si el motor devuelve nombres distintos/orden
     for c in expected_cols:
         if c not in df.columns:
-            df[c] = pd.Series(dtype="float64" if c == "Cant" else "object")
+            df[c] = pd.Series(
+                dtype="float64" if c == "Cant" or c == "PrecioUN" else "object"
+            )
 
     # Normalizaciones
     df["Fecha_Carga"] = pd.to_datetime(df["Fecha_Carga"], errors="coerce")
     df["FechEntr"] = pd.to_datetime(df["FechEntr"], errors="coerce")
     df["Cant"] = pd.to_numeric(df["Cant"], errors="coerce").fillna(0.0)
+    df["PrecioUN"] = pd.to_numeric(df["PrecioUN"], errors="coerce").fillna(
+        0.0
+    )  # Normalización del precio
     df["TipoForecast"] = (
         df["TipoForecast"]
         .astype(str)
