@@ -1,6 +1,12 @@
 ﻿# B_FCS001: Importaciones y configuración de base de datos para consultas forecast
 # # ∂B_FCS001/∂B0
+from __future__ import annotations
 import pandas as pd
+from pathlib import Path
+from typing import Optional, Union
+import sqlite3
+import numpy as np
+
 from utils.db import run_query
 from utils.db import DB_PATH, _run_cf_select
 
@@ -33,109 +39,159 @@ def obtener_clientes(slpcode, db_path=DB_PATH):
 
 # B_FCS004: Obtener forecast histórico detallado por vendedor y cliente
 # # ∂B_FCS004/∂B0
+# core/consultas_forecast.py
 def obtener_forecast_historico(
-    slpcode: int, cardcode: str, db_path: str = DB_PATH
+    slpcode: int,
+    cardcode: str,
+    anio: Optional[int] = None,
+    db_path: Union[str, Path] = "data.db",
 ) -> pd.DataFrame:
     """
-    Historiza forecast (Firme/Proyectado) para un vendedor+cliente.
-    - Logs compactos [HIST.*] sin emojis.
-    - Usa run_query(sql, params=(), db_path=None).
-    - Normaliza dtypes y títulos de TipoForecast.
+    Lee histórico de forecast para un vendedor (slpcode) y cliente (cardcode),
+    garantizando que el precio unitario (PrecioUN) venga desde BD y que la salida
+    tenga el esquema esperado (incluyendo estructura segura si no hay filas).
     """
-    import time
 
-    t0 = time.perf_counter()
+    print("[CFH-001] ▶ start obtener_forecast_historico")
+    print(
+        f"[CFH-001] args: slpcode={slpcode}({type(slpcode).__name__}), "
+        f"cardcode={type(cardcode).__name__}, anio={anio}, db_path={db_path}"
+    )
 
-    print(f"[HIST.INFO] start slpcode={slpcode} cardcode={cardcode}")
+    # ── Guards de tipo (evitan pasar DataFrame u otros objetos a cardcode)
+    if not isinstance(slpcode, (int, np.integer)):
+        raise TypeError("[CFH-001] slpcode debe ser int")
+    if not isinstance(cardcode, str):
+        raise TypeError("[CFH-001] cardcode debe ser str (no DataFrame, no dict, etc.)")
+    if anio is not None and not isinstance(anio, (int, np.integer)):
+        raise TypeError("[CFH-001] anio debe ser int o None")
 
-    sql = """
-        SELECT
-            f.Fecha_Carga,
-            fd.FechEntr,
-            fd.ItemCode,
-            i.ItemName,
-            fd.TipoForecast,
-            fd.Cant,
-            fd.PrecioUN  -- Agregado el campo de precio
-        FROM Forecast f
-        JOIN Forecast_Detalle fd ON f.ForecastID = fd.ForecastID
-        LEFT JOIN OITM i ON fd.ItemCode = i.ItemCode
-        WHERE f.SlpCode = ?
-          AND fd.CardCode = ?
-          AND UPPER(fd.TipoForecast) IN ('FIRME','PROYECTADO')
-        ORDER BY fd.FechEntr, f.Fecha_Carga
-    """
+    # ── SQL con PrecioUN y Cant, con filtro opcional por año
+    anio_filter = "AND f.Anio = ?" if anio is not None else ""
+    sql = f"""
+        WITH base AS (
+            SELECT
+                f.SlpCode                               AS SlpCode,
+                fd.ItemCode                              AS ItemCode,
+                i.ItemName                               AS ItemName,
+                f.CardCode                               AS CardCode,
+                fd.TipoForecast                          AS TipoForecast,
+                fd.OcrCode3                              AS OcrCode3,
+                fd.DocCur                                AS DocCur,
+                fd.Mes                                   AS Mes,
+                fd.Cant                                  AS Cant,
+                fd.PrecioUN                              AS PrecioUN
+            FROM Forecast_Detalle fd
+            JOIN Forecast f        ON f.Id = fd.ForecastID
+            LEFT JOIN OITM i       ON i.ItemCode = fd.ItemCode
+            WHERE f.SlpCode = ?
+              AND f.CardCode = ?
+              {anio_filter}
+        )
+        SELECT *
+        FROM base
+        ORDER BY ItemCode, TipoForecast, OcrCode3, DocCur, Mes
+    """.strip()
+
+    params = [int(slpcode), cardcode]
+    if anio is not None:
+        params.append(int(anio))
+    print(f"[CFH-001] sql params: {tuple(params)}")
+    # print(f"[CFH-001] sql preview:\n{sql}")  # descomenta si necesitas ver el SQL completo
 
     expected_cols = [
-        "Fecha_Carga",
-        "FechEntr",
+        "SlpCode",
         "ItemCode",
         "ItemName",
+        "CardCode",
         "TipoForecast",
+        "OcrCode3",
+        "DocCur",
+        "Mes",
         "Cant",
-        "PrecioUN",  # Agregada la columna esperada
+        "PrecioUN",
     ]
+    expected_dtypes = {
+        "SlpCode": "Int64",
+        "ItemCode": "string",
+        "ItemName": "string",
+        "CardCode": "string",
+        "TipoForecast": "string",
+        "OcrCode3": "string",
+        "DocCur": "string",
+        "Mes": "string",
+        "Cant": "float64",
+        "PrecioUN": "float64",
+    }
 
-    try:
-        df = run_query(sql, params=(slpcode, cardcode), db_path=db_path)
-    except Exception as e:
-        print(
-            f"[HIST.ERROR] query_fail slpcode={slpcode} cardcode={cardcode} err={e.__class__.__name__}: {e}"
-        )
-        return pd.DataFrame(columns=expected_cols)
+    # ── Ejecución
+    db_path = str(db_path)
+    with sqlite3.connect(db_path) as con:
+        df = pd.read_sql_query(sql, con, params=params)
 
-    if df is None or df.empty:
-        print(f"[HIST.INFO] empty rows=0 elapsed={time.perf_counter()-t0:.3f}s")
-        return pd.DataFrame(columns=expected_cols)
+    print(f"[CFH-001] raw result shape: {df.shape}")
 
-    # Asegurar columnas esperadas si el motor devuelve nombres distintos/orden
+    # ── Asegurar columnas esperadas (estructura segura incluso con DF vacío)
     for c in expected_cols:
         if c not in df.columns:
             df[c] = pd.Series(
-                dtype="float64" if c == "Cant" or c == "PrecioUN" else "object"
+                dtype="float64" if c in ("Cant", "PrecioUN") else "object"
             )
 
-    # Normalizaciones
-    df["Fecha_Carga"] = pd.to_datetime(df["Fecha_Carga"], errors="coerce")
-    df["FechEntr"] = pd.to_datetime(df["FechEntr"], errors="coerce")
-    df["Cant"] = pd.to_numeric(df["Cant"], errors="coerce").fillna(0.0)
-    df["PrecioUN"] = pd.to_numeric(df["PrecioUN"], errors="coerce").fillna(
-        0.0
-    )  # Normalización del precio
-    df["TipoForecast"] = (
-        df["TipoForecast"]
-        .astype(str)
-        .str.strip()
-        .str.lower()
-        .map({"firme": "Firme", "proyectado": "Proyectado"})
-        .fillna("Firme")
+    # ── Normalizaciones de tipo
+    # Mes debe ser "01".."12"
+    df["Mes"] = df["Mes"].astype(str).str.zfill(2)
+
+    # Numéricos
+    for c in ("Cant", "PrecioUN"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # Texto básico
+    for c in ("ItemCode", "ItemName", "CardCode", "TipoForecast", "OcrCode3", "DocCur"):
+        df[c] = df[c].astype("string")
+
+    # SlpCode entero tolerante a nulos
+    df["SlpCode"] = pd.to_numeric(df["SlpCode"], errors="coerce").astype("Int64")
+
+    # ── Reordenar columnas / ordenar filas
+    df = (
+        df[expected_cols]
+        .sort_values(
+            ["ItemCode", "TipoForecast", "OcrCode3", "DocCur", "Mes"], kind="stable"
+        )
+        .reset_index(drop=True)
     )
 
-    # Diagnóstico
-    dups_key = ["ItemCode", "TipoForecast", "FechEntr"]
-    dups_count = int(df.duplicated(dups_key, keep=False).sum())
-    tipos_dist = df["TipoForecast"].value_counts(dropna=False).to_dict()
-    items_n = int(df["ItemCode"].nunique())
-    fe_min = df["FechEntr"].min()
-    fe_max = df["FechEntr"].max()
-    fe_range = (
-        f"{fe_min.date()}..{fe_max.date()}"
-        if pd.notna(fe_min) and pd.notna(fe_max)
-        else "nan..nan"
-    )
+    # ── Cast final a dtypes esperados (sin forzar si DF está vacío)
+    if not df.empty:
+        for col, dt in expected_dtypes.items():
+            # Evita fallar si pandas no puede castear exactamente
+            try:
+                if dt == "Int64":
+                    df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+                elif dt == "float64":
+                    df[col] = pd.to_numeric(df[col], errors="coerce").astype("float64")
+                elif dt == "string":
+                    df[col] = df[col].astype("string")
+            except Exception as e:
+                print(f"[CFH-001][warn] dtype cast falló en {col} -> {dt}: {e}")
 
+    # ── Prints de diagnóstico utiles
+    present = list(df.columns)
+    missing = [c for c in expected_cols if c not in present]
+    print(f"[CFH-001] columns present: {present}")
+    print(f"[CFH-001] columns missing: {missing or '—'}")
     print(
-        f"[HIST.INFO] rows={len(df)} items={items_n} tipos={tipos_dist} "
-        f"range={fe_range} dups_on_key={dups_count}"
+        f"[CFH-001] nunique: ItemCode={df['ItemCode'].nunique(dropna=True)}, "
+        f"TipoForecast={df['TipoForecast'].nunique(dropna=True)}, Mes={df['Mes'].nunique(dropna=True)}"
+    )
+    print(
+        f"[CFH-001] PrecioUN nulls: {int(df['PrecioUN'].isna().sum())} / {len(df)}  | "
+        f"Cant nulls: {int(df['Cant'].isna().sum())} / {len(df)}"
     )
 
-    # Orden estable para consumidores aguas abajo
-    df = df.sort_values(
-        ["FechEntr", "Fecha_Carga", "ItemCode", "TipoForecast"]
-    ).reset_index(drop=True)
-
-    print(f"[HIST.INFO] end rows={len(df)} elapsed={time.perf_counter()-t0:.3f}s")
-    return df[expected_cols]
+    print("[CFH-001] ✅ done obtener_forecast_historico")
+    return df
 
 
 # B_FCS006: Consulta de stock disponible para lista de ítems

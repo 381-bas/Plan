@@ -186,7 +186,7 @@ def _serie_mensual_hist(df: pd.DataFrame, *args: str) -> pd.DataFrame:
 
     # ---- normalización de fechas ----
     df = df.copy()
-    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+    df[date_col] = pd.to_datetime(df[date_col], format="%Y-%m-%d", errors="coerce")
     df = df[df[date_col].notna()]
 
     # salida vacía pero con TODAS las columnas que esperan los consumidores

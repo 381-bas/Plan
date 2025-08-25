@@ -13,6 +13,9 @@ from pathlib import Path
 from typing import Tuple  # noqa: E402
 from typing import Optional
 from datetime import datetime
+import sqlite3
+
+
 from hashlib import sha256
 from pandas.util import hash_pandas_object  # hash estructural
 from session_utils import (
@@ -23,7 +26,6 @@ from session_utils import (
 
 
 from utils.db import (
-    _run_forecast_write,
     _run_forecast_insert_get_id,
     _run_log_to_sql,
 )
@@ -32,8 +34,9 @@ from config.contexto import obtener_slpcode
 
 from utils.repositorio_forecast.repositorio_forecast_editor import (
     obtener_buffer_cliente,  # ∂B
-    get_key_buffer,
 )
+
+from utils.repositorio_forecast.repositorio_forecast_editor import get_key_buffer
 
 
 # B_FCS005: Obtener forecast editable para edición directa por cliente
@@ -41,80 +44,175 @@ from utils.repositorio_forecast.repositorio_forecast_editor import (
 def obtener_forecast_editable(
     slp_code: int,
     card_code: str,
-    anio: int | None = None,
+    anio: Optional[int] = None,
     db_path: str = DB_PATH,
 ) -> pd.DataFrame:
     """
     Devuelve el forecast editable (cantidad, precio UN, moneda) en formato ancho 01-12,
     tomando únicamente el último ForecastID completo del cliente/año.
+    - Métrica fija: "Cantidad"
+    - Meses como columnas "01".."12"
+    - PrecioUN: promedio por clave (ItemCode, TipoForecast, OcrCode3)
+    - DocCur: primer valor por clave
     """
-    filtro_anio = "AND strftime('%Y', fd.FechEntr) = ?" if anio else ""
-    filtro_anio_id = "AND strftime('%Y', FechEntr) = ?" if anio else ""
 
-    query = f"""
-    WITH ultimo_id AS (
+    # ─────────────────────────────────────────────────────────────
+    # Prints de trazabilidad
+    # ─────────────────────────────────────────────────────────────
+    print("[CFE-002] ▶ start obtener_forecast_editable")
+    print(
+        f"[CFE-002] args: slp_code={slp_code}({type(slp_code).__name__}), "
+        f"card_code={card_code}({type(card_code).__name__}), anio={anio}, db_path={db_path}"
+    )
+
+    # ───────────────── Guards de tipo ─────────────────
+    if not isinstance(slp_code, (int, np.integer)):
+        raise TypeError("[CFE-002] slp_code debe ser int")
+    if not isinstance(card_code, str):
+        raise TypeError("[CFE-002] card_code debe ser str")
+    if anio is not None and not isinstance(anio, (int, np.integer)):
+        raise TypeError("[CFE-002] anio debe ser int o None")
+
+    # ───────────────── Filtros por año (FechEntr) ─────────────────
+    filtro_anio_det = "AND strftime('%Y', fd.FechEntr) = ?" if anio is not None else ""
+    filtro_anio_id = "AND strftime('%Y', FechEntr) = ?" if anio is not None else ""
+
+    # ───────────────── Paso 1: obtener el último ForecastID ─────────────────
+    q_last_id = f"""
         SELECT MAX(ForecastID) AS ForecastID
         FROM Forecast_Detalle
         WHERE SlpCode = ? AND CardCode = ?
           {filtro_anio_id}
-    )
-    SELECT
-        fd.ItemCode,
-        i.ItemName,
-        fd.TipoForecast,
-        fd.OcrCode3,
-        CAST(strftime('%m', fd.FechEntr) AS INTEGER) AS Mes,
-        SUM(fd.Cant)     AS Cantidad,
-        AVG(fd.PrecioUN) AS PrecioUN,
-        MAX(fd.DocCur)   AS DocCur
-    FROM Forecast_Detalle fd
-    JOIN ultimo_id u
-      ON fd.ForecastID = u.ForecastID
-    LEFT JOIN OITM i
-      ON i.ItemCode = fd.ItemCode
-    WHERE fd.SlpCode = ?
-      AND fd.CardCode = ?
-      {filtro_anio}
-    GROUP BY
-        fd.ItemCode, i.ItemName, fd.TipoForecast, fd.OcrCode3, Mes
-    ORDER BY
-        fd.ItemCode, fd.TipoForecast, Mes;
-    """
+    """.strip()
+    params_last: list[Any] = [slp_code, card_code]
+    if anio is not None:
+        params_last.append(str(anio))
+    df_last = run_query(q_last_id, db_path, tuple(params_last))
+    last_id = None if df_last.empty else df_last["ForecastID"].iloc[0]
 
-    # orden exacto de parámetros: (para CTE) slp, card, [anio]  +  (para WHERE final) slp, card, [anio]
-    params: list[Any] = [slp_code, card_code]
-    if anio:
-        params.append(str(anio))
-    params += [slp_code, card_code]
-    if anio:
-        params.append(str(anio))
+    print(f"[CFE-002] último ForecastID detectado → {last_id}")
 
-    df = run_query(query, db_path, tuple(params))
-
-    # Si no hay datos para el último ForecastID, devolver estructura vacía
-    if df.empty:
-        return pd.DataFrame(
-            columns=[
-                "ItemCode",
-                "ItemName",
-                "TipoForecast",
-                "Métrica",
-                "OcrCode3",
-                "PrecioUN",
-                "DocCur",
-                *[str(m).zfill(2) for m in range(1, 13)],
-            ]
+    # Si no hay último ID, devolver estructura vacía segura
+    if last_id is None or (isinstance(last_id, float) and np.isnan(last_id)):
+        print(
+            "[CFE-002] ⚠️ No hay ForecastID para este cliente/año → retornando estructura vacía"
         )
+        cols = [
+            "ItemCode",
+            "ItemName",
+            "TipoForecast",
+            "Métrica",
+            "OcrCode3",
+            *[f"{m:02d}" for m in range(1, 13)],
+            "PrecioUN",
+            "DocCur",
+        ]
+        empty = pd.DataFrame({c: pd.Series(dtype="float64") for c in cols})
+        # Ajustar dtypes de texto
+        for c in [
+            "ItemCode",
+            "ItemName",
+            "TipoForecast",
+            "Métrica",
+            "OcrCode3",
+            "DocCur",
+        ]:
+            empty[c] = empty[c].astype("string")
+        empty["Métrica"] = empty["Métrica"].astype("string")
+        print("[CFE-002] ✅ done obtener_forecast_editable (empty-safe: no last_id)")
+        return empty
 
-    # Pivot a 01..12
+    # ───────────────── Paso 2: query principal para ese ForecastID ─────────────────
+    query = f"""
+        SELECT
+            fd.ItemCode,
+            i.ItemName,
+            fd.TipoForecast,
+            fd.OcrCode3,
+            CAST(strftime('%m', fd.FechEntr) AS INTEGER) AS Mes,
+            SUM(fd.Cant)     AS Cantidad,
+            AVG(fd.PrecioUN) AS PrecioUN,
+            MAX(fd.DocCur)   AS DocCur
+        FROM Forecast_Detalle fd
+        LEFT JOIN OITM i
+          ON i.ItemCode = fd.ItemCode
+        WHERE fd.ForecastID = ?
+          AND fd.SlpCode    = ?
+          AND fd.CardCode   = ?
+          {filtro_anio_det}
+        GROUP BY
+            fd.ItemCode, i.ItemName, fd.TipoForecast, fd.OcrCode3, Mes
+        ORDER BY
+            fd.ItemCode, fd.TipoForecast, Mes
+    """.strip()
+
+    # Orden de parámetros: last_id + slp + card + [anio]
+    params_main: list[Any] = [int(last_id), slp_code, card_code]
+    if anio is not None:
+        params_main.append(str(anio))
+    print(f"[CFE-002] sql params(main): {tuple(params_main)}")
+
+    df = run_query(query, db_path, tuple(params_main))
+    print(f"[CFE-002] raw result shape: {df.shape}")
+
+    if df.empty:
+        print(
+            "[CFE-002] ⚠️ Forecast vacío para este cliente/año (con last_id válido) → estructura vacía"
+        )
+        cols = [
+            "ItemCode",
+            "ItemName",
+            "TipoForecast",
+            "Métrica",
+            "OcrCode3",
+            *[f"{m:02d}" for m in range(1, 13)],
+            "PrecioUN",
+            "DocCur",
+        ]
+        empty = pd.DataFrame({c: pd.Series(dtype="float64") for c in cols})
+        for c in [
+            "ItemCode",
+            "ItemName",
+            "TipoForecast",
+            "Métrica",
+            "OcrCode3",
+            "DocCur",
+        ]:
+            empty[c] = empty[c].astype("string")
+        empty["Métrica"] = empty["Métrica"].astype("string")
+        print("[CFE-002] ✅ done obtener_forecast_editable (empty-safe: no rows)")
+        return empty
+
+    # ───────────────── Normalizaciones ─────────────────
+    # Mes a 01..12 como texto; cantidades y precio a float
+    df["Mes"] = pd.to_numeric(df["Mes"], errors="coerce").clip(1, 12).astype("Int64")
+    df["Cantidad"] = pd.to_numeric(df["Cantidad"], errors="coerce").fillna(0.0)
+    df["PrecioUN"] = pd.to_numeric(df["PrecioUN"], errors="coerce").fillna(0.0)
+    for c in ["ItemCode", "ItemName", "TipoForecast", "OcrCode3", "DocCur"]:
+        df[c] = df[c].astype("string")
+
+    # ───────────────── Pivot a meses ─────────────────
     pivot = df.pivot_table(
         index=["ItemCode", "ItemName", "TipoForecast", "OcrCode3"],
         columns="Mes",
         values="Cantidad",
-        fill_value=0,
+        aggfunc="sum",
+        fill_value=0.0,
+        dropna=False,
     ).reset_index()
 
-    # Adjunta PrecioUN y DocCur por clave (promedio / first son seguros por clave)
+    # Asegurar columnas 01..12 (si faltan meses, crearlos con 0.0)
+    pivot.columns = [
+        f"{int(c):02d}" if isinstance(c, (int, np.integer)) else c
+        for c in pivot.columns
+    ]
+
+    for m in range(1, 13):
+        col = f"{m:02d}"
+        if col not in pivot.columns:
+            pivot[col] = 0.0
+
+    # ───────────────── Adjuntar PrecioUN y DocCur por clave ─────────────────
     precio_un = df.groupby(["ItemCode", "TipoForecast", "OcrCode3"], as_index=False)[
         "PrecioUN"
     ].mean()
@@ -122,113 +220,289 @@ def obtener_forecast_editable(
         "DocCur"
     ].first()
 
-    pivot = pivot.merge(precio_un, on=["ItemCode", "TipoForecast", "OcrCode3"]).merge(
-        doc_cur, on=["ItemCode", "TipoForecast", "OcrCode3"]
-    )
+    pivot = pivot.merge(
+        precio_un, on=["ItemCode", "TipoForecast", "OcrCode3"], how="left"
+    ).merge(doc_cur, on=["ItemCode", "TipoForecast", "OcrCode3"], how="left")
 
-    # Nombres de columnas 01..12 y relleno de faltantes
-    pivot.columns = [
-        str(c).zfill(2) if isinstance(c, int) else c for c in pivot.columns
-    ]
-    for m in range(1, 13):
-        col = f"{m:02d}"
-        if col not in pivot.columns:
-            pivot[col] = 0
-
+    # ───────────────── Métrica y orden final ─────────────────
     pivot["Métrica"] = "Cantidad"
-
-    orden = (
-        ["ItemCode", "ItemName", "TipoForecast", "Métrica", "OcrCode3"]
-        + [f"{m:02d}" for m in range(1, 13)]
-        + ["PrecioUN", "DocCur"]
+    months = [f"{m:02d}" for m in range(1, 13)]
+    orden = [
+        "ItemCode",
+        "ItemName",
+        "TipoForecast",
+        "Métrica",
+        "OcrCode3",
+        *months,
+        "PrecioUN",
+        "DocCur",
+    ]
+    # asegurar tipos numéricos en meses/precio
+    for m in months:
+        pivot[m] = (
+            pd.to_numeric(pivot[m], errors="coerce").fillna(0.0).astype("float64")
+        )
+    pivot["PrecioUN"] = (
+        pd.to_numeric(pivot["PrecioUN"], errors="coerce").fillna(0.0).astype("float64")
     )
+    pivot["Métrica"] = pivot["Métrica"].astype("string")
+
+    # ───────────────── Prints de diagnóstico ─────────────────
+    print(f"[CFE-002] editable shape: {pivot.shape}")
+    print(
+        f"[CFE-002] meses present → {', '.join([c for c in months if c in pivot.columns])}"
+    )
+    print(
+        f"[CFE-002] PrecioUN stats: count={pivot['PrecioUN'].notna().sum()}, "
+        f"mean={float(pivot['PrecioUN'].mean()):.4f}"
+    )
+    try:
+        # vista rápida (primeras filas, sin cortar columnas)
+        with pd.option_context("display.max_columns", None):
+            print("[CFE-002] head preview:")
+            print(pivot.head().to_string(index=False))
+    except Exception as e:
+        print(f"[CFE-002] head preview error: {e}")
+
+    print("[CFE-002] ✅ done obtener_forecast_editable")
     return pivot[orden]
+
+
+def autocompletar_precios_en_buffer(cliente: str) -> None:
+    """
+    Si en alguna fila/mes: Cantidad>0 y Precio==0, completa Precio con el 'precio de referencia'
+    de esa fila: el primer valor de precio no-cero del año para esa combinación
+    (ItemCode, TipoForecast, OcrCode3). Si no hay ninguno, deja 0.0.
+    """
+    key = get_key_buffer(cliente)
+    if key not in st.session_state:
+        print("[AUTO$] buffer no existe -> skip")
+        return
+
+    df = st.session_state[key].reset_index().copy()
+    months = [f"{m:02d}" for m in range(1, 13)]
+
+    # separar bloques
+    cant = df[df["Métrica"] == "Cantidad"].copy()
+    prec = df[df["Métrica"] == "Precio"].copy()
+
+    # join por clave base
+    keys = ["ItemCode", "TipoForecast", "OcrCode3"]
+    prec = prec.merge(cant[keys + months], on=keys, how="left", suffixes=("", "__cant"))
+
+    # para cada fila, obtener precio_ref (primer precio no-cero del año)
+    price_cols = months
+
+    def _precio_ref(row):
+        vals = [row[c] for c in price_cols if pd.notna(row[c]) and float(row[c]) != 0.0]
+        return float(vals[0]) if vals else 0.0
+
+    prec["__precio_ref"] = prec.apply(_precio_ref, axis=1)
+
+    # completar por mes: si Cantidad>0 y Precio==0 -> usar precio_ref; else mantener
+    for m in months:
+        cant_col = f"{m}__cant"
+        prec[m] = np.where(
+            (pd.to_numeric(prec[cant_col], errors="coerce").fillna(0.0) > 0.0)
+            & (pd.to_numeric(prec[m], errors="coerce").fillna(0.0) == 0.0),
+            prec["__precio_ref"],
+            prec[m],
+        ).astype("float64")
+
+    # limpiar columnas auxiliares y rearmar el buffer
+    prec = prec.drop(
+        columns=[f"{m}__cant" for m in months] + ["__precio_ref"], errors="ignore"
+    )
+    df_out = pd.concat([cant, prec], ignore_index=True).sort_values(keys + ["Métrica"])
+    st.session_state[key] = df_out.set_index(
+        ["ItemCode", "TipoForecast", "Métrica"]
+    ).sort_index()
+    print("[AUTO$] precios autocompletados en buffer (pre-guardado)")
 
 
 # B_BUF003: Inicialización extendida del buffer forecast con estructura y Métrica
 # # ∂B_BUF003/∂B0
 def inicializar_buffer_cliente(
-    cliente: str, df_base: pd.DataFrame, moneda_default: str = "CLP"
-):
-    key = get_key_buffer(cliente)
-    if key in st.session_state:
+    cliente: str,
+    df_base: pd.DataFrame,
+    moneda_default: str = "CLP",
+    precio_autofill_mode: str = "strict",  # "strict": Precio=PrecioUN solo donde Cantidad>0; "spread": si hay alguna Cantidad>0 en el año, todos los meses toman PrecioUN
+    force_reinit: bool = False,  # recalcula el buffer aunque ya exista en sesión
+) -> None:
+    """
+    Inicializa el buffer editable del cliente en st.session_state[get_key_buffer(cliente)].
+
+    Métricas:
+      - "Cantidad": usa los valores mensuales (01..12) de df_base.
+      - "Precio":
+          * modo "strict" (default): para cada mes, Precio = PrecioUN si Cantidad>0; en caso contrario 0.0.
+          * modo "spread": si la suma de Cantidad en el año > 0 para la fila, todos los meses toman PrecioUN;
+                           si no hay cantidad en ningún mes, todos los meses quedan en 0.0.
+      En ambos modos, el precio queda editable en la UI.
+
+    Requisitos mínimos en df_base: ["ItemCode","TipoForecast"] + meses "01".."12" (si faltan, se crean en 0.0).
+    Mantiene/crea "OcrCode3", "DocCur"; si está "ItemName" y/o "Linea", se preservan.
+    Guarda con índice ["ItemCode","TipoForecast","Métrica"] (la UI hace reset_index()).
+    """
+    print("[RFE-004] ▶ start inicializar_buffer_cliente")
+    print(
+        f"[RFE-004] args: cliente={cliente}({type(cliente).__name__}), "
+        f"df_base.shape={getattr(df_base,'shape',None)}, moneda_default={moneda_default}, "
+        f"precio_autofill_mode={precio_autofill_mode}, force_reinit={force_reinit}"
+    )
+
+    # ── Guards
+    if not isinstance(cliente, str):
+        raise TypeError("[RFE-004] cliente debe ser str")
+    if not isinstance(df_base, pd.DataFrame):
+        raise TypeError("[RFE-004] df_base debe ser DataFrame")
+    if precio_autofill_mode not in ("strict", "spread"):
+        raise ValueError("[RFE-004] precio_autofill_mode debe ser 'strict' o 'spread'")
+
+    # ── Clave de sesión
+    key = get_key_buffer(cliente)  # "forecast_buffer_{cliente}"
+    print(f"[RFE-004] key de buffer -> {key}")
+    if key in st.session_state and not force_reinit:
+        print(
+            f"[RFE-004] buffer ya existe en sesión: {key} -> skip (usa force_reinit=True para recalcular)"
+        )
         return
 
-    df_base = df_base.copy()
-    df_base.columns = df_base.columns.astype(str)
-    df_base["ItemCode"] = df_base["ItemCode"].astype(str).str.strip()
-    df_base["TipoForecast"] = df_base["TipoForecast"].astype(str).str.strip()
+    # ── Copia / normalización base
+    df = df_base.copy()
+    df.columns = df.columns.astype(str)
 
-    # 🧬 Forzar expansión por TipoForecast: cada ItemCode debe tener Firme y Proyectado
-    tipos = ["Firme", "Proyectado"]
-    df_expandido = []
+    required_cols = {"ItemCode", "TipoForecast"}
+    faltan = required_cols - set(df.columns)
+    if faltan:
+        raise ValueError(f"[RFE-004] Faltan columnas esenciales en df_base: {faltan}")
 
-    for itemcode in df_base["ItemCode"].unique():
-        df_item = df_base[df_base["ItemCode"] == itemcode]
-        tipos_actuales = df_item["TipoForecast"].unique()
+    # Tipos de texto
+    for c in ["ItemCode", "TipoForecast"]:
+        df[c] = df[c].astype("string").str.strip()
+    if "ItemName" in df.columns:
+        df["ItemName"] = df["ItemName"].astype("string")
+    if "OcrCode3" not in df.columns:
+        df["OcrCode3"] = ""
+    df["OcrCode3"] = df["OcrCode3"].astype("string")
+    if "DocCur" not in df.columns:
+        df["DocCur"] = moneda_default
+    df["DocCur"] = df["DocCur"].astype("string")
 
-        for tipo in tipos:
-            if tipo in tipos_actuales:
-                df_expandido.append(df_item[df_item["TipoForecast"] == tipo].copy())
+    # Meses 01..12
+    months = [f"{m:02d}" for m in range(1, 13)]
+    for m in months:
+        if m not in df.columns:
+            df[m] = 0.0
+        df[m] = pd.to_numeric(df[m], errors="coerce").fillna(0.0).astype("float64")
+
+    # ── Asegurar ambos tipos por clave base (Firme/Proyectado)
+    tipos_obj = ["Firme", "Proyectado"]
+    base_keys = ["ItemCode", "OcrCode3", "DocCur"]  # robusto por ítem/centro/moneda
+    if "ItemName" in df.columns:
+        base_keys.insert(1, "ItemName")
+
+    frames = []
+    for _, sub in df.groupby(base_keys, dropna=False):
+        presentes = set(sub["TipoForecast"].dropna().unique().tolist())
+        for t in tipos_obj:
+            if t in presentes:
+                frames.append(sub[sub["TipoForecast"] == t].copy())
             else:
-                df_clon = df_item[df_item["TipoForecast"] == tipos_actuales[0]].copy()
-                df_clon["TipoForecast"] = tipo
-                meses = [str(m).zfill(2) for m in range(1, 13)]
-                df_clon[meses] = 0  # Reiniciar valores de meses
-                df_expandido.append(df_clon)
+                clone = sub.iloc[[0]].copy()
+                clone["TipoForecast"] = t
+                for m in months:
+                    clone[m] = 0.0
+                frames.append(clone)
+    df = pd.concat(frames, ignore_index=True) if frames else df
 
-    df_base = pd.concat(df_expandido, ignore_index=True)
+    # ── PrecioUN por clave (si existe en df_base)
+    precio_map = None
+    if "PrecioUN" in df.columns:
+        precio_map = df[["ItemCode", "TipoForecast", "OcrCode3", "PrecioUN"]].copy()
+        precio_map["PrecioUN"] = pd.to_numeric(
+            precio_map["PrecioUN"], errors="coerce"
+        ).fillna(0.0)
 
-    # 🔒 Validar estructura mínima
-    columnas_minimas = {"ItemCode", "TipoForecast"}
-    if not columnas_minimas.issubset(df_base.columns):
-        raise ValueError(
-            f"Faltan columnas esenciales en df_base: {columnas_minimas - set(df_base.columns)}"
-        )
-
-    # ⚠️ Captura los valores de PrecioUN antes de eliminar
-    precio_un_map = None
-    if "PrecioUN" in df_base.columns:
-        precio_un_map = df_base[
-            ["ItemCode", "TipoForecast", "OcrCode3", "PrecioUN"]
-        ].copy()
-
-    # 🧹 Eliminar columnas conflictivas
-    columnas_prohibidas = ["PrecioUN", "_PrecioUN_", "PrecioUnitario"]
-    df_base = df_base.drop(
-        columns=[c for c in columnas_prohibidas if c in df_base.columns],
+    # Eliminar columnas de precio crudo para evitar duplicidades
+    df = df.drop(
+        columns=[
+            c for c in ["PrecioUN", "_PrecioUN_", "PrecioUnitario"] if c in df.columns
+        ],
         errors="ignore",
     )
 
-    # Asegurar columnas adicionales
-    if "OcrCode3" not in df_base.columns:
-        df_base["OcrCode3"] = ""
-    if "DocCur" not in df_base.columns:
-        df_base["DocCur"] = moneda_default
-
-    columnas_mes = [str(m).zfill(2) for m in range(1, 13)]
-
-    # Crear duplicado por Métrica
-    cantidad = df_base.copy()
+    # ── Métrica = Cantidad
+    cantidad = df.copy()
     cantidad["Métrica"] = "Cantidad"
 
-    precio = df_base.copy()
+    # ── Métrica = Precio (autocompletado)
+    precio = df.copy()
     precio["Métrica"] = "Precio"
-
-    # ✅ Aplicar PrecioUN a todos los meses si estaba disponible
-    if precio_un_map is not None:
+    if precio_map is not None and not precio_map.empty:
         precio = precio.merge(
-            precio_un_map, on=["ItemCode", "TipoForecast", "OcrCode3"], how="left"
+            precio_map, on=["ItemCode", "TipoForecast", "OcrCode3"], how="left"
         )
-        for col in columnas_mes:
-            precio[col] = precio["PrecioUN"]
+        precio["PrecioUN"] = pd.to_numeric(precio["PrecioUN"], errors="coerce").fillna(
+            0.0
+        )
+
+        if precio_autofill_mode == "strict":
+            # Por mes: si Cantidad>0 → PrecioUN; else → 0.0
+            for m in months:
+                precio[m] = np.where(cantidad[m] > 0, precio["PrecioUN"], 0.0).astype(
+                    "float64"
+                )
+        else:  # spread
+            # Si hay alguna cantidad en el año → todos los meses toman PrecioUN; de lo contrario 0.0
+            any_qty = (cantidad[months].sum(axis=1) > 0).astype(bool)
+            for m in months:
+                precio[m] = np.where(any_qty, precio["PrecioUN"], 0.0).astype("float64")
+
+        # En el buffer, los meses ya llevan el precio editable (no necesitamos la columna auxiliar)
         precio = precio.drop(columns=["PrecioUN"], errors="ignore")
     else:
-        precio[columnas_mes] = 0
+        for m in months:
+            precio[m] = 0.0  # sin referencia → 0.0 editable
 
+    # ── Unir métricas
     df_combo = pd.concat([cantidad, precio], ignore_index=True)
 
-    st.session_state[key] = df_combo.set_index(["ItemCode", "TipoForecast", "Métrica"])
+    # ── Orden de columnas amigable para el editor
+    base_cols = ["ItemCode"]
+    if "ItemName" in df_combo.columns:
+        base_cols.append("ItemName")
+    base_cols += ["TipoForecast", "Métrica", "OcrCode3"]
+    tail_cols = []
+    if "DocCur" in df_combo.columns:
+        tail_cols.append("DocCur")
+    if "Linea" in df_combo.columns:
+        tail_cols.append("Linea")  # si estaba en df_base, la preservamos
+
+    ordered = (
+        [c for c in base_cols if c in df_combo.columns]
+        + months
+        + [c for c in tail_cols if c in df_combo.columns]
+    )
+    df_combo = df_combo[ordered].copy()
+
+    # ── Guardar en sesión con índice esperado
+    st.session_state[key] = df_combo.set_index(
+        ["ItemCode", "TipoForecast", "Métrica"]
+    ).sort_index()
+
+    # ── Trazas
+    print(f"[RFE-004] saved buffer -> {key}")
+    print(f"[RFE-004] buffer shape (rows x cols): {st.session_state[key].shape}")
+    print(f"[RFE-004] columnas: {list(st.session_state[key].columns)}")
+    try:
+        with pd.option_context("display.max_columns", None):
+            print("[RFE-004] head (indexed):")
+            print(st.session_state[key].head().to_string())
+    except Exception as e:
+        print(f"[RFE-004] head preview error: {e}")
+
+    print("[RFE-004] ✅ done inicializar_buffer_cliente")
 
 
 # B_HDF001: Hash semántico para DataFrame con control de cambios estructurales
@@ -1123,196 +1397,356 @@ def existe_forecast_individual(
 # B_FEN002: Inserción de detalle de forecast a SQL (Forecast_Detalle)
 # ∂B_FEN002/∂B1
 def insertar_forecast_detalle(
-    df_detalle: pd.DataFrame,
+    df_in: pd.DataFrame,
     forecast_id: int,
     anio: int,
-    db_path: str | None = None,
-):
+    db_path: str = DB_PATH,
+    replace: bool = True,
+) -> int:
     """
-    Inserta (o reemplaza) el detalle de un Forecast de forma idempotente.
-    ▸ NO inserta Cant==0 (bajas se materializan con DELETE puntual).
-    ▸ Construye FechEntr desde anio+Mes (YYYY-MM-01).
-    ▸ Crea índice único para habilitar UPSERT.
-    Logs compactos y consistentes: [DETALLE.INFO]/[DETALLE.WARN]/[DETALLE.ERROR] + [METRICAS].
+    Inserta detalle de forecast en Forecast_Detalle para un ForecastID dado.
+
+    Formatos soportados:
+    1) ANCHO (buffer editor con Métrica):
+       cols: ["ItemCode","TipoForecast","Métrica","OcrCode3", "01".."12", ("PrecioUN" opcional), "DocCur", ("Linea" opcional)]
+       - Se hace melt a largo (Cant y PrecioUN), preservando 'Linea' si existe.
+
+    2) LARGO:
+       cols mínimas: ["ItemCode","TipoForecast","OcrCode3","Mes","Cant"] y opcionales ["PrecioUN","DocCur","Linea"]
+       - 'Mes' en "01".."12" (str) o 1..12 (int)
+       - 'PrecioUN' faltante => 0.0; 'DocCur' faltante => "CLP"
+
+    Si `replace=True`, elimina el detalle previo de ese ForecastID antes de insertar.
+    Devuelve el número de filas preparadas para insertar (aprox. filas insertadas).
     """
-    import time
-
-    t0 = time.perf_counter()
+    print("[PFD-007] ▶ start insertar_forecast_detalle")
     print(
-        f"[DETALLE.START] insertar_forecast_detalle forecast_id={forecast_id} anio={anio}"
+        f"[PFD-007] args: forecast_id={forecast_id}({type(forecast_id).__name__}), "
+        f"anio={anio}, df_in.shape={getattr(df_in,'shape',None)}, db_path={db_path}, replace={replace}"
     )
 
-    if not forecast_id or forecast_id < 0:
-        raise ValueError(f"[DETALLE.ERROR] ForecastID inválido: {forecast_id}")
+    # ── Guards
+    if not isinstance(df_in, pd.DataFrame):
+        raise TypeError("[PFD-007] df_in debe ser DataFrame")
+    if not isinstance(forecast_id, (int, np.integer)):
+        raise TypeError("[PFD-007] forecast_id debe ser int")
+    if not isinstance(anio, (int, np.integer)):
+        raise TypeError("[PFD-007] anio debe ser int")
 
-    required = {
-        "CardCode",
-        "ItemCode",
-        "TipoForecast",
-        "OcrCode3",
-        "Linea",
-        "Cant",
-        "PrecioUN",
-        "DocCur",
-        "SlpCode",
-        "Mes",
-    }
-    missing = required - set(df_detalle.columns)
-    if missing:
-        raise ValueError(f"[DETALLE.ERROR] Faltan columnas requeridas: {missing}")
+    months = [f"{m:02d}" for m in range(1, 13)]
 
-    # 0) Normalización
-    df = df_detalle.copy()
-    print(f"[DETALLE.INFO] rows_in={len(df)}")
-
-    df["Mes"] = df["Mes"].astype(str).str.zfill(2)
-    df["Cant"] = (
-        pd.to_numeric(df["Cant"], errors="coerce").fillna(0.0).astype("float64")
-    )
-    df["PrecioUN"] = (
-        pd.to_numeric(df["PrecioUN"], errors="coerce").fillna(0.0).astype("float64")
-    )
-
-    # 1) Pre-chequeo de duplicados en el LOTE (clave negocio + Mes)
-    clave_lote = [
-        "CardCode",
-        "ItemCode",
-        "TipoForecast",
-        "OcrCode3",
-        "Linea",
-        "Mes",
-        "DocCur",
-        "SlpCode",
-    ]
-    dup_counts = df.groupby(clave_lote).size().reset_index(name="count")
-    dup_keys = int((dup_counts["count"] > 1).sum())
-    print(f"[DETALLE.INFO] check_dups keys_duplicadas={dup_keys}")
-    if dup_keys:
-        print("[DETALLE.WARN] lote_duplicados keep=last (no suma)")
-        df = df.sort_index().drop_duplicates(subset=clave_lote, keep="last")
-
-    # 2) Construir FechEntr = YYYY-MM-01
-    df["FechEntr"] = pd.to_datetime(
-        df["Mes"].radd(f"{anio}-"), format="%Y-%m", errors="coerce"
-    ).dt.strftime("%Y-%m-01")
-    if df["FechEntr"].isna().any():
-        errores = df[df["FechEntr"].isna()][["ItemCode", "TipoForecast", "Mes"]]
-        print(f"[DETALLE.ERROR] fechentr_invalid rows={len(errores)}")
-        raise ValueError("Mes inválido: no se pudo construir FechEntr.")
-
-    sample_fech = ", ".join(df["FechEntr"].dropna().astype(str).unique()[:3])
-    print(
-        f"[DETALLE.INFO] fechas_generadas uniq={df['FechEntr'].nunique()} sample=[{sample_fech}]"
-    )
-
-    # 3) Índice único para habilitar UPSERT (idempotencia)
-    t_idx = time.perf_counter()
-    _run_forecast_write(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_ForecastDetalle
-        ON Forecast_Detalle (
-          ForecastID, SlpCode, CardCode, ItemCode, Linea, OcrCode3, TipoForecast, FechEntr
-        );
-        """,
-        None,
-        many=False,
-        db_path=db_path,
-    )
-    print(f"[DETALLE.INFO] index_ready elapsed={time.perf_counter()-t_idx:.3f}s")
-
-    # 4) Particionar BAJAS (Cant==0) vs UPserts (Cant>0)
-    df_bajas = df[df["Cant"] == 0.0].copy()
-    df_upsert = df[df["Cant"] > 0.0].copy()
-    print(f"[DETALLE.INFO] partitions bajas={len(df_bajas)} upsert={len(df_upsert)}")
-
-    # 4.a) BAJAS: DELETE puntual por clave COMPLETA
-    rows_deleted = 0
-    if not df_bajas.empty:
-        t_del = time.perf_counter()
-        tuplas_delete = [
-            (
-                forecast_id,
-                int(r.SlpCode),
-                r.CardCode,
-                int(r.ItemCode),
-                r.Linea,
-                r.OcrCode3,
-                r.TipoForecast,
-                r.FechEntr,
+    # ───────────────── Helper: header Forecast (para SlpCode/CardCode) ─────────────────
+    def _leer_header_forecast(_id: int) -> dict:
+        try:
+            df_h = run_query(
+                "SELECT Id, SlpCode, CardCode FROM Forecast WHERE Id = ?",
+                db_path,
+                (int(_id),),
             )
-            for r in df_bajas.itertuples()
-        ]
-        _run_forecast_write(
-            """
-            DELETE FROM Forecast_Detalle
-            WHERE ForecastID = ?
-              AND SlpCode    = ?
-              AND CardCode   = ?
-              AND ItemCode   = ?
-              AND Linea      = ?
-              AND OcrCode3   = ?
-              AND TipoForecast = ?
-              AND FechEntr   = ?
-            """,
-            tuplas_delete,
-            many=True,
-            db_path=db_path,
-        )
-        rows_deleted = len(tuplas_delete)
-        print(
-            f"[DETALLE.INFO] delete_applied rows={rows_deleted} elapsed={time.perf_counter()-t_del:.3f}s"
-        )
-
-    # 4.b) ALTAS/MODIF: UPSERT (NO insertamos ceros)
-    rows_upserted = 0
-    if not df_upsert.empty:
-        t_ins = time.perf_counter()
-        tuplas_upsert = [
-            (
-                forecast_id,
-                r.CardCode,
-                int(r.ItemCode),
-                r.FechEntr,
-                r.TipoForecast,
-                r.OcrCode3,
-                r.Linea,
-                float(r.Cant),
-                float(r.PrecioUN),
-                r.DocCur,
-                int(r.SlpCode),
+            if df_h.empty:
+                print(
+                    f"[PFD-007] ⚠️ ForecastId {forecast_id} no existe en header -> SlpCode/CardCode desconocidos"
+                )
+                return {}
+            row = df_h.iloc[0].to_dict()
+            print(
+                f"[PFD-007] header Forecast -> SlpCode={row.get('SlpCode')} CardCode={row.get('CardCode')}"
             )
-            for _, r in df_upsert.iterrows()
-        ]
-        print(f"[DETALLE.INFO] upsert rows={len(tuplas_upsert)}")
-        _run_forecast_write(
-            """
-            INSERT INTO Forecast_Detalle (
-                ForecastID, CardCode, ItemCode, FechEntr,
-                TipoForecast, OcrCode3, Linea, Cant,
-                PrecioUN, DocCur, SlpCode
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(ForecastID, SlpCode, CardCode, ItemCode, Linea, OcrCode3, TipoForecast, FechEntr)
-            DO UPDATE SET
-              Cant      = excluded.Cant,
-              PrecioUN  = excluded.PrecioUN,
-              DocCur    = excluded.DocCur;
-            """,
-            tuplas_upsert,
-            many=True,
-            db_path=db_path,
-        )
-        rows_upserted = len(tuplas_upsert)
-        print(
-            f"[DETALLE.INFO] upsert_done rows={rows_upserted} elapsed={time.perf_counter()-t_ins:.3f}s"
+            return row
+        except Exception as e:
+            print(f"[PFD-007][warn] error leyendo header Forecast: {e}")
+            return {}
+
+    header = _leer_header_forecast(forecast_id)
+    slp_from_header = header.get("SlpCode")
+    card_from_header = header.get("CardCode")
+
+    # ───────────────── Detectar formato ─────────────────
+    cols = set(df_in.columns.astype(str))
+    is_ancho_editor = ("Métrica" in cols) and (len(set(months) & cols) > 0)
+    is_largo = {"ItemCode", "TipoForecast", "OcrCode3", "Mes"}.issubset(cols)
+    print(
+        f"[PFD-007] formato detectado -> ancho_editor={is_ancho_editor}, largo={is_largo}"
+    )
+    print(
+        f"[PFD-007] Linea en df_in: {'sí' if 'Linea' in cols else 'no'} "
+        f"| n_no_nulos={int(df_in['Linea'].notna().sum()) if 'Linea' in cols else 0}"
+    )
+
+    if not is_ancho_editor and not is_largo:
+        raise ValueError(
+            "[PFD-007] df_in no coincide con formatos soportados (ancho con Métrica o largo con Mes)."
         )
 
-    total_cant = float(df_upsert["Cant"].sum()) if not df_upsert.empty else 0.0
-    print(
-        f"[METRICAS] rows_deleted={rows_deleted}, rows_upserted={rows_upserted}, zero_transitions_applied={len(df_bajas)}"
+    # ───────────────── Normalizar a LARGO con ['Cant','PrecioUN'] y preservar 'Linea' ─────────────────
+    if is_ancho_editor:
+        df = df_in.copy()
+        for c in ["ItemCode", "TipoForecast", "Métrica", "OcrCode3"]:
+            df[c] = df[c].astype("string")
+        if "DocCur" in df.columns:
+            df["DocCur"] = df["DocCur"].astype("string")
+        # melt Cantidad (agrega Linea si existe)
+        id_vars_cant = [
+            c
+            for c in [
+                "ItemCode",
+                "TipoForecast",
+                "OcrCode3",
+                "DocCur",
+                "Métrica",
+                "Linea",
+            ]
+            if c in df.columns
+        ]
+        cant_wide = df[df["Métrica"] == "Cantidad"].copy()
+        cant_long = cant_wide.melt(
+            id_vars=id_vars_cant,
+            value_vars=[m for m in months if m in cant_wide.columns],
+            var_name="Mes",
+            value_name="Cant",
+        ).drop(columns=["Métrica"], errors="ignore")
+
+        # melt Precio (si hay bloque "Precio"); también preserva Linea
+        if (df["Métrica"] == "Precio").any():
+            id_vars_prec = [
+                c
+                for c in [
+                    "ItemCode",
+                    "TipoForecast",
+                    "OcrCode3",
+                    "DocCur",
+                    "Métrica",
+                    "Linea",
+                ]
+                if c in df.columns
+            ]
+            precio_wide = df[df["Métrica"] == "Precio"].copy()
+            precio_long = precio_wide.melt(
+                id_vars=id_vars_prec,
+                value_vars=[m for m in months if m in precio_wide.columns],
+                var_name="Mes",
+                value_name="PrecioUN",
+            ).drop(columns=["Métrica"], errors="ignore")
+        else:
+            precio_long = cant_long[
+                ["ItemCode", "TipoForecast", "OcrCode3", "DocCur", "Mes"]
+                + (["Linea"] if "Linea" in cant_long.columns else [])
+            ].copy()
+            precio_long["PrecioUN"] = 0.0
+
+        merge_keys = [
+            k
+            for k in ["ItemCode", "TipoForecast", "OcrCode3", "DocCur", "Mes", "Linea"]
+            if k in cant_long.columns and k in precio_long.columns
+        ]
+        df_long = cant_long.merge(precio_long, on=merge_keys, how="left")
+
+    else:
+        df_long = df_in.copy()
+        for c in ["ItemCode", "TipoForecast", "OcrCode3"]:
+            df_long[c] = df_long[c].astype("string")
+        if "DocCur" in df_long.columns:
+            df_long["DocCur"] = df_long["DocCur"].astype("string")
+
+        if "Cant" not in df_long.columns:
+            if "Cant_Esperada" in df_long.columns:
+                df_long = df_long.rename(columns={"Cant_Esperada": "Cant"})
+            elif "Cantidad" in df_long.columns:
+                df_long = df_long.rename(columns={"Cantidad": "Cant"})
+            else:
+                raise ValueError(
+                    "[PFD-007] df_largo debe contener 'Cant'/'Cant_Esperada'/'Cantidad'."
+                )
+
+        if "PrecioUN" not in df_long.columns:
+            df_long["PrecioUN"] = 0.0
+
+        if "Mes" not in df_long.columns:
+            raise ValueError("[PFD-007] df_largo debe contener 'Mes' (01..12).")
+
+    # ───────────────── Limpieza final y defaults ─────────────────
+    df_long["Mes"] = df_long["Mes"].astype(str).str.zfill(2)
+    df_long["Cant"] = pd.to_numeric(df_long["Cant"], errors="coerce").fillna(0.0)
+    df_long["PrecioUN"] = pd.to_numeric(df_long["PrecioUN"], errors="coerce").fillna(
+        0.0
     )
+
+    if "SlpCode" not in df_long.columns and slp_from_header is not None:
+        df_long["SlpCode"] = int(slp_from_header)
+    if "CardCode" not in df_long.columns and card_from_header is not None:
+        df_long["CardCode"] = str(card_from_header)
+    if "SlpCode" not in df_long.columns or "CardCode" not in df_long.columns:
+        raise ValueError(
+            "[PFD-007] No se pudo determinar SlpCode/CardCode (agregue al DF o verifique Forecast)."
+        )
+
+    if "DocCur" not in df_long.columns:
+        df_long["DocCur"] = "CLP"
+    df_long["DocCur"] = df_long["DocCur"].astype("string")
+
+    if "OcrCode3" not in df_long.columns:
+        df_long["OcrCode3"] = ""
+    df_long["OcrCode3"] = df_long["OcrCode3"].astype("string")
+
+    if "ItemCode" not in df_long.columns:
+        raise ValueError("[PFD-007] Falta 'ItemCode' en df_long.")
+    if "TipoForecast" not in df_long.columns:
+        raise ValueError("[PFD-007] Falta 'TipoForecast' en df_long.")
+
+    # Normalización de 'Linea' (si está presente)
+    linea_present = "Linea" in df_long.columns
+    if linea_present:
+        # Intento de castear a entero si aplica; si no, mantener como string
+        try:
+            linea_num = pd.to_numeric(df_long["Linea"], errors="coerce")
+            if (
+                linea_num.notna().any()
+                and df_long["Linea"]
+                .astype(str)
+                .str.fullmatch(r"\d+")
+                .fillna(False)
+                .all()
+            ):
+                df_long["Linea"] = linea_num.astype("Int64")
+            else:
+                df_long["Linea"] = df_long["Linea"].astype("string")
+        except Exception as e:
+            print(f"[PFD-007][warn] normalización de 'Linea' como Int64 falló: {e}")
+            df_long["Linea"] = df_long["Linea"].astype("string")
+
+    # Filtrar filas completamente vacías (Cant==0 y PrecioUN==0)
+    before_rows = len(df_long)
+    df_long = df_long[(df_long["Cant"] != 0) | (df_long["PrecioUN"] != 0)]
+    removed = before_rows - len(df_long)
     print(
-        f"[DETALLE.END] total_cantidad_pos={total_cant:,.2f} elapsed={time.perf_counter()-t0:.3f}s"
+        f"[PFD-007] filtrado filas vacías -> removidas={removed}, restantes={len(df_long)}"
     )
+    if linea_present:
+        print(
+            f"[PFD-007] 'Linea' no nulos tras filtro -> {int(df_long['Linea'].notna().sum())}"
+        )
+
+    if df_long.empty:
+        print("[PFD-007] ⚠️ No hay filas para insertar tras filtrado. Nada que hacer.")
+        return 0
+
+    # ───────────────── Preflight de tabla y tipos (¿existe columna 'Mes'? ¿'Linea'?) ─────────────────
+    with sqlite3.connect(db_path) as con:
+        pragma = pd.read_sql_query("PRAGMA table_info(Forecast_Detalle)", con)
+        cols_tabla_lower = pragma["name"].str.lower().tolist()
+        tipos_tabla = dict(
+            zip(pragma["name"].tolist(), pragma["type"].str.upper().fillna("").tolist())
+        )
+        has_col_mes = "mes" in cols_tabla_lower
+        has_col_linea = "linea" in cols_tabla_lower
+        print(
+            f"[PFD-007] columnas en Forecast_Detalle: {cols_tabla_lower} | has_col_mes={has_col_mes} | has_col_linea={has_col_linea}"
+        )
+
+        # Borrado previo
+        if replace:
+            con.execute(
+                "DELETE FROM Forecast_Detalle WHERE ForecastID = ?", (int(forecast_id),)
+            )
+            print(f"[PFD-007] detalle previo eliminado para ForecastID={forecast_id}")
+
+        # Campos a insertar (dinámicos según existencia de Mes/Linea)
+        fields = [
+            "ForecastID",
+            "SlpCode",
+            "CardCode",
+            "ItemCode",
+            "OcrCode3",
+            "FechEntr",
+        ]
+        if has_col_mes:
+            fields.append("Mes")
+        fields += ["Cant", "PrecioUN", "DocCur", "TipoForecast"]
+        if has_col_linea:
+            fields.append("Linea")
+
+        placeholders = "(" + ",".join(["?"] * len(fields)) + ")"
+        sql = (
+            f"INSERT INTO Forecast_Detalle ({', '.join(fields)}) VALUES {placeholders}"
+        )
+
+        # Construir valores por fila
+        def _row_tuple(r) -> tuple:
+            base = [
+                int(forecast_id),
+                int(r["SlpCode"]),
+                str(r["CardCode"]),
+                str(r["ItemCode"]),
+                str(r["OcrCode3"]),
+                pd.to_datetime(r["FechEntr"]).strftime("%Y-%m-%d"),
+            ]
+            if has_col_mes:
+                base.append(int(str(r["Mes"]).zfill(2)))
+            base.extend(
+                [
+                    float(r["Cant"]),
+                    float(r["PrecioUN"]),
+                    str(r["DocCur"]),
+                    str(r["TipoForecast"]),
+                ]
+            )
+            if has_col_linea:
+                val = r.get("Linea", None)
+                # Cast según tipo declarado en la tabla
+                if val is None or (isinstance(val, float) and np.isnan(val)):
+                    base.append(None)
+                else:
+                    tipo = tipos_tabla.get("Linea", "").upper()
+                    if "INT" in tipo:
+                        try:
+                            base.append(int(val))
+                        except Exception:
+                            # fallback si viene texto no numérico
+                            base.append(None)
+                    else:
+                        base.append(str(val))
+            return tuple(base)
+
+        # Asegurar FechEntr desde anio + Mes
+        if "FechEntr" not in df_long.columns or df_long["FechEntr"].isna().any():
+            df_long["FechEntr"] = pd.to_datetime(
+                df_long["Mes"].radd(f"{int(anio)}-"), format="%Y-%m", errors="coerce"
+            )
+            df_long.loc[df_long["FechEntr"].isna(), "FechEntr"] = pd.to_datetime(
+                f"{int(anio)}-01-01"
+            )
+
+        rows = [_row_tuple(r) for _, r in df_long.iterrows()]
+        con.executemany(sql, rows)
+        con.commit()
+        inserted = con.total_changes
+
+    print(
+        f"[PFD-007] ✅ insert completado | filas_insertadas (aprox)={inserted} | rows_preparadas={len(rows)}"
+    )
+    # Vista de control (incluye 'Linea' si aplica)
+    try:
+        preview_cols = [
+            "ItemCode",
+            "TipoForecast",
+            "OcrCode3",
+            "Mes",
+            "FechEntr",
+            "Cant",
+            "PrecioUN",
+            "DocCur",
+        ]
+        if linea_present:
+            preview_cols.append("Linea")
+        preview_cols = [c for c in preview_cols if c in df_long.columns]
+        with pd.option_context("display.max_columns", None):
+            print("[PFD-007] preview a insertar (primeras 5):")
+            print(df_long[preview_cols].head().to_string(index=False))
+    except Exception as e:
+        print(f"[PFD-007] preview error: {e}")
+
+    print("[PFD-007] ⛳ done insertar_forecast_detalle")
+    return len(rows)
 
 
 # B_FEN004: Inserción de cabecera Forecast (SlpCode + Fecha_Carga)
@@ -1435,6 +1869,9 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                 )
 
         try:
+
+            autocompletar_precios_en_buffer(cliente)  # ← INSERTA ESTA LÍNEA AQUÍ
+
             df_base = st.session_state[key_buffer].reset_index()
             slpcode = int(obtener_slpcode())
 
@@ -2230,186 +2667,225 @@ def _reset_estado_edicion_por_cliente(cliente: str, key_buffer: str):
         )
 
 
-def _refrescar_buffer_ui(forecast_id: int, key_buffer: str, db_path: str):
+def _refrescar_buffer_ui(
+    forecast_id: int, key_buffer: str, db_path: str = DB_PATH
+) -> None:
     """
-    Reconstruye el buffer de UI SOLO desde BD para el ForecastID activo,
-    deduplicando por clave de negocio y sin sumar registros duplicados.
-    Garantiza 4 filas (Cantidad/Precio × Firme/Proyectado) y 12 meses (01..12)
-    por par base (ItemCode+OcrCode3+DocCur).
-    Logs: [BUFFER.INFO]/[BUFFER.WARN]/[BUFFER.ERROR] en una sola línea, sin emojis.
+    Reconstruye el buffer de edición (Cantidad/Precio) para un ForecastID dado y lo
+    guarda en st.session_state[key_buffer] con índice ["ItemCode","TipoForecast","Métrica"].
+
+    - Cantidad: SUM(Cant) por mes (01..12).
+    - Precio:   replica el promedio PrecioUN por clave (ItemCode, TipoForecast, OcrCode3)
+                en todos los meses.
+    - DocCur:   primer valor por clave (se preserva como columna).
+    - Linea:    si existía en el buffer anterior, se intenta preservar por (ItemCode, OcrCode3).
     """
-    import time
+    print("[RFE-005] ▶ start _refrescar_buffer_ui")
+    print(
+        f"[RFE-005] args: forecast_id={forecast_id}({type(forecast_id).__name__}), "
+        f"key_buffer={key_buffer}, db_path={db_path}"
+    )
 
-    t0 = time.perf_counter()
-    print(f"[BUFFER.INFO] refresh.start forecast_id={forecast_id} key={key_buffer}")
+    # ── Guards
+    if not isinstance(forecast_id, (int, np.integer)):
+        raise TypeError("[RFE-005] forecast_id debe ser int")
+    if not isinstance(key_buffer, str) or not key_buffer:
+        raise TypeError("[RFE-005] key_buffer debe ser str no vacío")
 
-    # 1) Traer SOLO el detalle del ForecastID activo (sin Timestamp/ID)
-    qry = """
+    # ── Cargar buffer previo (para preservar 'Linea' si existía)
+    prev_linea_map = None
+    if key_buffer in st.session_state:
+        try:
+            prev_df = st.session_state[key_buffer].reset_index().copy()
+            if "Linea" in prev_df.columns:
+                prev_linea_map = prev_df.drop_duplicates(["ItemCode", "OcrCode3"])[
+                    ["ItemCode", "OcrCode3", "Linea"]
+                ]
+                print(
+                    f"[RFE-005] preservando 'Linea' (registros únicos map={len(prev_linea_map)})"
+                )
+        except Exception as e:
+            print(f"[RFE-005][warn] no se pudo leer buffer previo para 'Linea': {e}")
+
+    # ── Consulta base por ForecastID
+    query = """
         SELECT
-            ItemCode,
-            TipoForecast,
-            OcrCode3,
-            Linea,
-            DocCur,
-            CAST(strftime('%m', FechEntr) AS TEXT) AS Mes,
-            Cant,
-            PrecioUN,
-            ROWID AS _rid
-        FROM Forecast_Detalle
-        WHERE ForecastID = ?
-    """
-    try:
-        df_post = run_query(qry, params=(forecast_id,), db_path=db_path)
-    except Exception as e:
-        print(
-            f"[BUFFER.ERROR] query_failed forecast_id={forecast_id} exc={type(e).__name__} msg={e}"
-        )
-        raise
+            fd.ItemCode,
+            i.ItemName,
+            fd.TipoForecast,
+            fd.OcrCode3,
+            CAST(strftime('%m', fd.FechEntr) AS INTEGER) AS Mes,
+            SUM(fd.Cant)     AS Cantidad,
+            AVG(fd.PrecioUN) AS PrecioUN,
+            MAX(fd.DocCur)   AS DocCur
+        FROM Forecast_Detalle fd
+        LEFT JOIN OITM i
+          ON i.ItemCode = fd.ItemCode
+        WHERE fd.ForecastID = ?
+        GROUP BY
+            fd.ItemCode, i.ItemName, fd.TipoForecast, fd.OcrCode3, Mes
+        ORDER BY
+            fd.ItemCode, fd.TipoForecast, Mes
+    """.strip()
 
-    if df_post is None or df_post.empty:
-        print(
-            f"[BUFFER.WARN] empty forecast_id={forecast_id} action=session_clear key={key_buffer} elapsed={time.perf_counter()-t0:.3f}s"
-        )
-        st.session_state[key_buffer] = None
+    df = run_query(query, db_path, (int(forecast_id),))
+    print(f"[RFE-005] raw result shape: {df.shape}")
+
+    # ── Estructura vacía segura si no hay filas
+    months = [f"{m:02d}" for m in range(1, 13)]
+    if df.empty:
+        print("[RFE-005] ⚠️ sin filas para ForecastID -> buffer vacío pero consistente")
+        cols = [
+            "ItemCode",
+            "ItemName",
+            "TipoForecast",
+            "Métrica",
+            "OcrCode3",
+            *months,
+            "PrecioUN",
+            "DocCur",
+        ]
+        empty = pd.DataFrame({c: pd.Series(dtype="float64") for c in cols})
+        for c in [
+            "ItemCode",
+            "ItemName",
+            "TipoForecast",
+            "Métrica",
+            "OcrCode3",
+            "DocCur",
+        ]:
+            empty[c] = empty[c].astype("string")
+        st.session_state[key_buffer] = empty.set_index(
+            ["ItemCode", "TipoForecast", "Métrica"]
+        ).sort_index()
+        print("[RFE-005] ✅ done _refrescar_buffer_ui (empty-safe)")
         return
 
-    print(f"[BUFFER.INFO] fetch rows={len(df_post)} cols={list(df_post.columns)}")
+    # ── Normalizaciones
+    df["Mes"] = pd.to_numeric(df["Mes"], errors="coerce").clip(1, 12).astype("Int64")
+    df["Cantidad"] = pd.to_numeric(df["Cantidad"], errors="coerce").fillna(0.0)
+    df["PrecioUN"] = pd.to_numeric(df["PrecioUN"], errors="coerce").fillna(0.0)
+    for c in ["ItemCode", "ItemName", "TipoForecast", "OcrCode3", "DocCur"]:
+        df[c] = df[c].astype("string")
 
-    # 2) Normalizar Mes a '01'..'12'
-    df_post["Mes"] = df_post["Mes"].astype(str).str.zfill(2)
+    # ── PIVOT Cantidad 01..12
+    piv_cant = df.pivot_table(
+        index=["ItemCode", "ItemName", "TipoForecast", "OcrCode3", "DocCur"],
+        columns="Mes",
+        values="Cantidad",
+        aggfunc="sum",
+        dropna=False,
+        fill_value=0.0,
+    ).reset_index()
+    # renombrar columnas de meses a "01".."12" y crear faltantes
+    piv_cant.columns = [
+        f"{c:02d}" if isinstance(c, (int, np.integer)) else c for c in piv_cant.columns
+    ]
+    for m in months:
+        if m not in piv_cant.columns:
+            piv_cant[m] = 0.0
+    piv_cant = piv_cant[
+        ["ItemCode", "ItemName", "TipoForecast", "OcrCode3", "DocCur", *months]
+    ].copy()
 
-    # 3) Ordenar para que 'last' sea realmente el último registro insertado
-    sort_cols = ["_rid"]
-    if "FechEntr" in df_post.columns:
-        sort_cols.insert(0, "FechEntr")
-    df_post = df_post.sort_values(sort_cols)
-    print(f"[BUFFER.INFO] sort.by={sort_cols}")
-
-    # 4) Deduplicar por clave de negocio a nivel de mes (quedarse con el último)
-    claves_mes = ["ItemCode", "TipoForecast", "OcrCode3", "DocCur", "Mes"]
-    before_dedup = len(df_post)
-    df_dedup = df_post.drop_duplicates(claves_mes, keep="last").copy()
-    after_dedup = len(df_dedup)
-    print(
-        f"[BUFFER.INFO] dedup key={claves_mes} before={before_dedup} after={after_dedup} removed={before_dedup-after_dedup}"
-    )
-
-    # 5) Mapear 'Linea' representativa
-    clave_sin_mes_full = ["ItemCode", "TipoForecast", "OcrCode3", "DocCur"]
-    clave_base = ["ItemCode", "OcrCode3", "DocCur"]
-    linea_map_full = df_dedup.groupby(clave_sin_mes_full, as_index=False)[
-        "Linea"
-    ].last()
-    linea_map_base = df_dedup.groupby(clave_base, as_index=False)["Linea"].last()
-
-    # 6) Pivots (usar último valor, sin sumas)
-    meses = [f"{i:02d}" for i in range(1, 13)]
-
-    pivot_cant = (
-        df_dedup.pivot_table(
-            index=clave_sin_mes_full,
-            columns="Mes",
-            values="Cant",
-            aggfunc="last",
-            fill_value=0.0,
-        )
-        .reindex(columns=meses, fill_value=0.0)
+    # ── Precio promedio por clave y réplica en meses
+    precio_avg = (
+        df.groupby(
+            ["ItemCode", "ItemName", "TipoForecast", "OcrCode3", "DocCur"], dropna=False
+        )["PrecioUN"]
+        .mean()
         .reset_index()
     )
-    pivot_cant["Métrica"] = "Cantidad"
 
-    pivot_prec = (
-        df_dedup.pivot_table(
-            index=clave_sin_mes_full,
-            columns="Mes",
-            values="PrecioUN",
-            aggfunc="last",
-            fill_value=0.0,
-        )
-        .reindex(columns=meses, fill_value=0.0)
-        .reset_index()
-    )
-    pivot_prec["Métrica"] = "Precio"
+    # Métrica = Cantidad
+    cantidad_df = piv_cant.copy()
+    cantidad_df.insert(3, "Métrica", "Cantidad")
+    cantidad_df = cantidad_df[
+        [
+            "ItemCode",
+            "ItemName",
+            "TipoForecast",
+            "Métrica",
+            "OcrCode3",
+            *months,
+            "DocCur",
+        ]
+    ]
 
-    print(f"[BUFFER.INFO] pivot.shapes cant={pivot_cant.shape} prec={pivot_prec.shape}")
-
-    # 7) Unir métricas y re-incorporar 'Linea'
-    df_metrico = pd.concat([pivot_cant, pivot_prec], ignore_index=True)
-    df_metrico = df_metrico.merge(
-        linea_map_full, on=clave_sin_mes_full, how="left", suffixes=("", "_from_full")
-    )
-
-    # Fallback Linea por clave base si quedó nulo
-    mask_linea_null = df_metrico["Linea"].isna()
-    if mask_linea_null.any():
-        missing = int(mask_linea_null.sum())
-        print(
-            f"[BUFFER.INFO] linea.null.after_full count={missing} fallback_key={clave_base}"
-        )
-        df_metrico = df_metrico.merge(
-            linea_map_base, on=clave_base, how="left", suffixes=("", "_fallback")
-        )
-        df_metrico["Linea"] = df_metrico["Linea"].fillna(df_metrico["Linea_fallback"])
-        df_metrico.drop(
-            columns=[c for c in df_metrico.columns if c.endswith("_fallback")],
-            inplace=True,
-        )
-
-    # 8) Garantizar 4 filas por base (Firme/Proyectado × Cantidad/Precio)
-    base = df_metrico[clave_base].drop_duplicates()
-    tipos = pd.DataFrame({"TipoForecast": ["Firme", "Proyectado"]})
-    metricas = pd.DataFrame({"Métrica": ["Cantidad", "Precio"]})
-    grid = base.merge(tipos, how="cross").merge(metricas, how="cross")
-
-    df_metrico = grid.merge(
-        df_metrico,
+    # Métrica = Precio (replicar PrecioUN por mes)
+    precio_df = piv_cant.merge(
+        precio_avg,
+        on=["ItemCode", "ItemName", "TipoForecast", "OcrCode3", "DocCur"],
         how="left",
-        on=["ItemCode", "OcrCode3", "DocCur", "TipoForecast", "Métrica"],
-        suffixes=("", "_y"),
     )
-
-    # Rellenos de meses
-    for m in meses:
-        if m not in df_metrico.columns:
-            df_metrico[m] = 0.0
-        df_metrico[m] = pd.to_numeric(df_metrico[m], errors="coerce").fillna(0.0)
-
-    # Si aún faltase Linea, completar con el último disponible por base
-    if df_metrico["Linea"].isna().any():
-        left = int(df_metrico["Linea"].isna().sum())
-        print(f"[BUFFER.INFO] linea.null.after_merge count={left} fill=base_map")
-        df_metrico = df_metrico.merge(
-            linea_map_base, on=clave_base, how="left", suffixes=("", "_b")
+    for m in months:
+        precio_df[m] = (
+            pd.to_numeric(precio_df["PrecioUN"], errors="coerce")
+            .fillna(0.0)
+            .astype("float64")
         )
-        df_metrico["Linea"] = df_metrico["Linea"].fillna(df_metrico["Linea_b"])
-        df_metrico.drop(
-            columns=[c for c in df_metrico.columns if c.endswith("_b")], inplace=True
-        )
+    precio_df.insert(3, "Métrica", "Precio")
+    # Opcional: mantener PrecioUN como columna para auditoría; si no, se elimina:
+    # precio_df = precio_df.drop(columns=["PrecioUN"], errors="ignore")
+    precio_df = precio_df[
+        [
+            "ItemCode",
+            "ItemName",
+            "TipoForecast",
+            "Métrica",
+            "OcrCode3",
+            *months,
+            "PrecioUN",
+            "DocCur",
+        ]
+    ]
 
-    # 9) Reordenar columnas finales
-    cols_fijas = ["ItemCode", "TipoForecast", "OcrCode3", "Linea", "DocCur", "Métrica"]
-    df_metrico = (
-        df_metrico[cols_fijas + meses]
-        .sort_values(by=["ItemCode", "TipoForecast", "Métrica"])
-        .reset_index(drop=True)
-    )
+    # ── Unir métricas
+    buffer_df = pd.concat([cantidad_df, precio_df], ignore_index=True)
 
-    expected = len(base) * 4
-    final_rows = len(df_metrico)
-    if final_rows != expected:
-        print(
-            f"[BUFFER.WARN] row_mismatch base={len(base)} expected={expected} final={final_rows}"
+    # ── Reincorporar 'Linea' si existía
+    if prev_linea_map is not None and not prev_linea_map.empty:
+        buffer_df = buffer_df.merge(
+            prev_linea_map, on=["ItemCode", "OcrCode3"], how="left"
         )
 
-    print(
-        f"[BUFFER.INFO] grid.base={len(base)} rows.final={final_rows} cols.final={len(df_metrico.columns)}"
-    )
-    print(f"[BUFFER.INFO] cols.final={df_metrico.columns.tolist()}")
+    # ── Casts finales y guardar en sesión
+    for c in ["ItemCode", "ItemName", "TipoForecast", "Métrica", "OcrCode3", "DocCur"]:
+        buffer_df[c] = buffer_df[c].astype("string")
+    for m in months:
+        buffer_df[m] = (
+            pd.to_numeric(buffer_df[m], errors="coerce").fillna(0.0).astype("float64")
+        )
+    if "PrecioUN" in buffer_df.columns:
+        buffer_df["PrecioUN"] = (
+            pd.to_numeric(buffer_df["PrecioUN"], errors="coerce")
+            .fillna(0.0)
+            .astype("float64")
+        )
 
-    # 10) Persistir en sesión con el índice usado por la UI
-    st.session_state[key_buffer] = df_metrico.set_index(
+    # Mantener columnas ordenadas y setear índice esperado
+    ordered = ["ItemCode", "ItemName", "TipoForecast", "Métrica", "OcrCode3", *months]
+    if "PrecioUN" in buffer_df.columns:
+        ordered += ["PrecioUN"]
+    ordered += ["DocCur"]
+    if "Linea" in buffer_df.columns:
+        ordered += ["Linea"]
+
+    buffer_df = buffer_df[ordered].copy()
+
+    st.session_state[key_buffer] = buffer_df.set_index(
         ["ItemCode", "TipoForecast", "Métrica"]
-    )
-    print(
-        f"[BUFFER.INFO] session.set key={key_buffer} rows={final_rows} index=('ItemCode','TipoForecast','Métrica') elapsed={time.perf_counter()-t0:.3f}s"
-    )
+    ).sort_index()
+
+    # ── Trazas
+    print(f"[RFE-005] saved buffer -> {key_buffer}")
+    print(f"[RFE-005] buffer shape (rows x cols): {st.session_state[key_buffer].shape}")
+    print(f"[RFE-005] columnas: {list(st.session_state[key_buffer].columns)}")
+    try:
+        with pd.option_context("display.max_columns", None):
+            print("[RFE-005] head (indexed):")
+            print(st.session_state[key_buffer].head().to_string())
+    except Exception as e:
+        print(f"[RFE-005] head preview error: {e}")
+
+    print("[RFE-005] ✅ done _refrescar_buffer_ui")
