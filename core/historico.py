@@ -164,27 +164,57 @@ def _rango_mensual(df_dates: pd.Series) -> pd.DatetimeIndex:
     return pd.date_range(start, end, freq="MS")
 
 
-def _serie_mensual(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
+def _serie_mensual_hist(df: pd.DataFrame, *args: str) -> pd.DataFrame:
     """
-    Retorna: Periodo (datetime64, inicio de mes), value_col, MesLbl (str para eje nominal), Ord (int)
+    Uso compatible:
+      - _serie_mensual_hist(df, value_col)
+      - _serie_mensual_hist(df, date_col, value_col)
+    Por defecto usa 'DocDueDate' como date_col.
+    Retorna: Periodo, value_col, Year, MonthAbbr, MesLbl, Ord
     """
+    # ---- firma compatible ----
+    if len(args) == 1:
+        date_col = "DocDueDate"
+        value_col = args[0]
+    elif len(args) == 2:
+        date_col, value_col = args
+    else:
+        raise TypeError(
+            f"_serie_mensual_hist espera (df, value_col) o (df, date_col, value_col); "
+            f"recibidos {1 + len(args)} argumentos."
+        )
+
+    # ---- normalización de fechas ----
     df = df.copy()
-    df["Periodo"] = pd.to_datetime(df["DocDueDate"]).dt.to_period("M").dt.to_timestamp()
-    idx = _rango_mensual(df["DocDueDate"])
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+    df = df[df[date_col].notna()]
+
+    # salida vacía pero con TODAS las columnas que esperan los consumidores
+    if df.empty:
+        return pd.DataFrame(
+            columns=["Periodo", value_col, "Year", "MonthAbbr", "MesLbl", "Ord"]
+        )
+
+    # ---- agregación mensual ----
+    df["Periodo"] = df[date_col].dt.to_period("M").dt.to_timestamp()
+    idx = _rango_mensual(df[date_col])
     ser = (
         df.groupby("Periodo", as_index=True)[value_col].sum().reindex(idx, fill_value=0)
     )
     out = ser.reset_index().rename(columns={"index": "Periodo", value_col: value_col})
 
-    # Etiqueta visible en eje: Ene, Feb, ..., y en enero añadimos salto de línea con el año
+    # ---- etiquetas/columnas para compatibilidad (stock) ----
+    out["Year"] = out["Periodo"].dt.year.astype(int)
+    out["MonthAbbr"] = out["Periodo"].dt.month.map(MESES_ES)
+
+    # ---- etiquetas para histórico (ejes nominales) ----
     meses = out["Periodo"].dt.month
     anios = out["Periodo"].dt.year.astype(str)
     out["MesLbl"] = [
         f"{MESES_ES[m]}" + (f"\n{y}" if m == 1 else "") for m, y in zip(meses, anios)
     ]
-
-    # Orden nominal para conservar la secuencia temporal
     out["Ord"] = np.arange(len(out))
+
     return out
 
 
@@ -249,7 +279,7 @@ def vista_historico(
 
         # 1) Cantidad por mes
         with col_qty:
-            qty_m = _serie_mensual(df[["DocDueDate", "Quantity"]], "Quantity")
+            qty_m = _serie_mensual_hist(df[["DocDueDate", "Quantity"]], "Quantity")
             order_qty = qty_m["MesLbl"].tolist()
             axis_nom = alt.Axis(labelAngle=-90, labelOverlap=False, title="Mes")
             base_qty = (
@@ -278,7 +308,7 @@ def vista_historico(
 
         # 2) Monto por mes (CLP)
         with col_amt:
-            amt_m = _serie_mensual(df[["DocDueDate", "LineTotal"]], "LineTotal")
+            amt_m = _serie_mensual_hist(df[["DocDueDate", "LineTotal"]], "LineTotal")
             order_amt = amt_m["MesLbl"].tolist()
             axis_nom = alt.Axis(labelAngle=-90, labelOverlap=False, title="Mes")
             base_amt = (

@@ -3,7 +3,6 @@
 from __future__ import annotations
 import pandas as pd
 from typing import Any
-import os
 import re
 import hashlib
 import time
@@ -16,7 +15,12 @@ from typing import Optional
 from datetime import datetime
 from hashlib import sha256
 from pandas.util import hash_pandas_object  # hash estructural
-from session_utils import normalize_df_for_hash, safe_pickle_load, atomic_pickle_dump
+from session_utils import (
+    normalize_df_for_hash,
+    load_df_parquet_safe,
+    save_df_parquet_atomic,
+)
+
 
 from utils.db import (
     _run_forecast_write,
@@ -588,14 +592,14 @@ def sincronizar_para_guardado_final(key_buffer: str, df_editado: pd.DataFrame):
     return df_guardar
 
 
-BASE_TEMP = os.path.join(os.path.dirname(__file__), "..", "temp_ediciones")
-os.makedirs(BASE_TEMP, exist_ok=True)
+BASE_TEMP = Path(__file__).resolve().parent.parent / "temp_ediciones"
+BASE_TEMP.mkdir(parents=True, exist_ok=True)
 
 
 # B_TMP002: Construcción de ruta de backup temporal para cliente
 # # ∂B_TMP002/∂B0
-def _ruta_temp(cliente: str) -> str:
-    return os.path.join(BASE_TEMP, f"{cliente}_forecast.pkl")
+def _ruta_temp(cliente: str) -> Path:
+    return BASE_TEMP / f"{cliente}_forecast.parquet"
 
 
 # B_HDF001: Hash robusto de DataFrame usando SHA-256 (control de integridad)
@@ -606,20 +610,18 @@ def hash_df(df):
     ).hexdigest()
 
 
-# B_TMP003: Guardado seguro de backup temporal (.pkl) del DataFrame de cliente
+# B_TMP003: Guardado seguro de backup temporal (.parquet) del DataFrame de cliente
 # # ∂B_TMP003/∂B0
 def guardar_temp_local(cliente: str, df: pd.DataFrame):
     """
-    Backup temporal (pickle) por cliente:
+    Backup temporal (parquet) por cliente:
     - Hash estructural estable para evitar escrituras redundantes.
     - Lectura segura (lista blanca) confinada al directorio destino.
     - Escritura atómica (tmp + replace).
     Logs: [TMP.INFO]/[TMP.WARN]/[TMP.ERROR] en una sola línea, sin emojis.
     """
-
     t0 = time.perf_counter()
-    ruta_str = _ruta_temp(cliente)  # p.ej. ".../tmp/<cliente>.pkl"
-    ruta = Path(ruta_str).resolve()
+    ruta = _ruta_temp(cliente)  # p.ej. ".../temp_ediciones/<cliente>_forecast.parquet"
     ruta.parent.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -632,7 +634,7 @@ def guardar_temp_local(cliente: str, df: pd.DataFrame):
         hash_prev = None
         if ruta.exists():
             try:
-                df_prev = safe_pickle_load(ruta, ruta.parent)
+                df_prev = load_df_parquet_safe(ruta, allowed_dir=BASE_TEMP)
                 df_prev_norm = normalize_df_for_hash(df_prev)
                 hash_prev = int(hash_pandas_object(df_prev_norm, index=True).sum())
             except Exception as _e:
@@ -651,7 +653,7 @@ def guardar_temp_local(cliente: str, df: pd.DataFrame):
                 )
                 return
 
-        atomic_pickle_dump(df, ruta)
+        save_df_parquet_atomic(df, ruta)
         size = ruta.stat().st_size if ruta.exists() else None
         print(
             f"[TMP.INFO] saved — cliente={cliente} path={ruta} bytes={size} elapsed={time.perf_counter()-t0:.3f}s"
@@ -924,7 +926,6 @@ def df_forecast_metrico_to_largo(
       - Cant = suma por clave; PrecioUN = último no-cero (si no hay, último valor).
       - FechEntr = primer día de cada mes de `anio` (date).
     """
-    import pandas as pd
 
     _dbg = print if debug else (lambda *a, **k: None)
     _dbg(
@@ -1389,9 +1390,6 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
     - (✔) Resets y hashing intactos; recuperación post-error solo si hubo ForecastID.
     - (✔) Logs más explícitos y defensas adicionales.
     """
-    import time
-    import numpy as np
-    import pandas as pd  # ← Asegura disponibilidad de pd dentro de la función
 
     t0 = time.perf_counter()
     print("[SAVE.INFO] start")
