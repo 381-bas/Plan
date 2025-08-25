@@ -69,26 +69,111 @@ def restricted_unpickle(fp: io.BufferedReader) -> Any:
 
 def safe_pickle_load(path: str | Path, allowed_dir: str | Path) -> Any:
     """
-    Carga un pickle sólo si ‘path’ cae dentro de ‘allowed_dir’ y usando RestrictedUnpickler.
+    Carga un pickle sólo si `path` cae dentro de `allowed_dir` y usando RestrictedUnpickler.
+    Logs: [PKL.INFO]/[PKL.ERROR] en una sola línea, sin emojis.
     """
+    import time
+    from pathlib import Path
+
+    t0 = time.perf_counter()
     p = Path(path).resolve()
     base = Path(allowed_dir).resolve()
-    if not str(p).startswith(str(base)):
-        raise ValueError(f"Ruta no permitida para pickle: {p}")
-    with open(p, "rb") as f:
-        return restricted_unpickle(f)
+    print(f"[PKL.INFO] load.start path={p} allowed_dir={base}")
+
+    # Chequeo robusto de contención (mejor que startswith)
+    try:
+        p.relative_to(base)  # lanza ValueError si p no está dentro de base
+    except Exception:
+        elapsed = time.perf_counter() - t0
+        msg = f"Ruta no permitida para pickle: {p}"
+        print(
+            f"[PKL.ERROR] disallowed_path path={p} base={base} msg={msg} elapsed={elapsed:.3f}s"
+        )
+        raise ValueError(msg)
+
+    try:
+        if not p.exists():
+            elapsed = time.perf_counter() - t0
+            print(
+                f"[PKL.ERROR] load.fail path={p} err=FileNotFoundError: archivo no existe elapsed={elapsed:.3f}s"
+            )
+            raise FileNotFoundError(p)
+
+        size = p.stat().st_size
+        with open(p, "rb") as f:
+            obj = restricted_unpickle(f)
+
+        # Detalle ligero del tipo cargado
+        try:
+            import pandas as pd  # opcional, sólo para etiquetar DataFrame
+
+            if isinstance(obj, pd.DataFrame):
+                r, c = obj.shape
+                type_info = f"type=DataFrame shape=({r},{c})"
+            elif isinstance(obj, (list, dict, tuple, set)):
+                type_info = f"type={type(obj).__name__} size={len(obj)}"
+            else:
+                type_info = f"type={type(obj).__name__}"
+        except Exception:
+            type_info = f"type={type(obj).__name__}"
+
+        elapsed = time.perf_counter() - t0
+        print(
+            f"[PKL.INFO] load.ok path={p} bytes={size} {type_info} elapsed={elapsed:.3f}s"
+        )
+        return obj
+
+    except Exception as e:
+        elapsed = time.perf_counter() - t0
+        print(
+            f"[PKL.ERROR] load.fail path={p} err={e.__class__.__name__}: {e} elapsed={elapsed:.3f}s"
+        )
+        raise
 
 
 def atomic_pickle_dump(obj: Any, path: str | Path) -> None:
     """
     Escritura atómica: dump a .tmp y luego replace -> sin archivos corruptos si hay fallo.
+    Logs: [PKL.INFO]/[PKL.ERROR] en una sola línea, sin emojis.
     """
-    p = Path(path)
+    import os
+    import time
+    import pickle
+    from pathlib import Path
+
+    t0 = time.perf_counter()
+    p = Path(path).resolve()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".tmp")
-    with open(tmp, "wb") as f:
-        pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
-    tmp.replace(p)
+
+    print(
+        f"[PKL.INFO] write.start path={p} tmp={tmp} protocol={pickle.HIGHEST_PROTOCOL}"
+    )
+    try:
+        with open(tmp, "wb") as f:
+            pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+            f.flush()
+            os.fsync(f.fileno())
+
+        tmp_bytes = tmp.stat().st_size if tmp.exists() else None
+        tmp.replace(p)  # atómico en el mismo filesystem
+        final_bytes = p.stat().st_size if p.exists() else None
+
+        print(
+            f"[PKL.INFO] write.ok path={p} bytes={final_bytes} tmp_bytes={tmp_bytes} elapsed={time.perf_counter()-t0:.3f}s"
+        )
+    except Exception as e:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception as e2:
+            print(
+                f"[PKL.ERROR] tmp_cleanup.fail path={tmp} err={e2.__class__.__name__}: {e2}"
+            )
+        print(
+            f"[PKL.ERROR] write.fail path={p} err={e.__class__.__name__}: {e} elapsed={time.perf_counter()-t0:.3f}s"
+        )
+        raise
 
 
 def normalize_df_for_hash(df: "pd.DataFrame") -> "pd.DataFrame":

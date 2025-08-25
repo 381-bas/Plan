@@ -6,6 +6,7 @@ from typing import Any
 import os
 import re
 import hashlib
+import time
 import numpy as np
 from utils.db import DB_PATH, run_query
 import streamlit as st
@@ -367,142 +368,117 @@ def sincronizar_buffer_edicion(
 def sincronizar_buffer_local(
     df_buffer: pd.DataFrame, df_editado: pd.DataFrame
 ) -> Tuple[pd.DataFrame, bool]:
-    """
-    Fusiona los cambios del editor con el buffer activo y
-    devuelve (df_final, hay_cambios).
-    """
-    print("🔄 [SYNC-LOCAL-START] Iniciando sincronización buffer local")
-    print(f"📊 [SYNC-LOCAL-INFO] df_buffer shape: {df_buffer.shape}")
-    print(f"📝 [SYNC-LOCAL-INFO] df_editado shape: {df_editado.shape}")
+    """Fusiona cambios del editor con el buffer y devuelve (df_final, hay_cambios)."""
+    import time
+
+    t0 = time.perf_counter()
+    print("[SYNC.LOCAL.INFO] start")
 
     columnas_clave = ["ItemCode", "TipoForecast", "Métrica", "OcrCode3"]
-    print(f"🔑 [SYNC-LOCAL-INFO] Columnas clave: {columnas_clave}")
 
-    # ── Detectar dinámicamente las columnas-mes ──────────────────────────────
+    # Detectar dinámicamente columnas de meses (01..12 o 1..12)
     columnas_mes = sorted(
         [c for c in df_editado.columns if c.isdigit() and len(c) <= 2],
         key=lambda x: int(x),
     )
     columnas_req = columnas_clave + columnas_mes
-
-    print(f"📅 [SYNC-LOCAL-INFO] Columnas mes detectadas: {columnas_mes}")
-    print(f"📋 [SYNC-LOCAL-INFO] Columnas requeridas: {columnas_req}")
-
-    # ── Validación mínima de esquema ────────────────────────────────────────
-    faltantes = set(columnas_req) - set(df_editado.columns)
-    if faltantes:
-        print(f"❌ [SYNC-LOCAL-ERROR] Columnas faltantes en editado: {faltantes}")
+    if missing := (set(columnas_req) - set(df_editado.columns)):
+        print(f"[SYNC.LOCAL.ERROR] missing_columns editado={missing}")
         raise ValueError(
-            f"El DataFrame editado carece de columnas requeridas: {faltantes}"
+            f"El DataFrame editado carece de columnas requeridas: {missing}"
         )
 
-    # ── Índices normalizados ────────────────────────────────────────────────
-    print("🔧 [SYNC-LOCAL-STEP] Configurando índices...")
-    buf_idx = df_buffer.set_index(columnas_clave)
-    edi_idx = df_editado.set_index(columnas_clave)
+    print(f"[SYNC.LOCAL.INFO] meses_detectados={len(columnas_mes)}")
 
-    # Ordenarlos una única vez: evita PerformanceWarning y acelera update()
-    buf_idx = buf_idx.sort_index()
-    edi_idx = edi_idx.sort_index()
-    print(
-        f"📊 [SYNC-LOCAL-INFO] Índices ordenados - buffer: {buf_idx.shape}, editado: {edi_idx.shape}"
-    )
+    # Índices normalizados y ordenados (mejor para update)
+    buf_idx = df_buffer.set_index(columnas_clave).sort_index()
+    edi_idx = df_editado.set_index(columnas_clave).sort_index()
 
-    # Unir índices para contemplar filas nuevas/eliminadas
+    # Unión de índices (contempla altas/bajas)
     idx_union = buf_idx.index.union(edi_idx.index)
-    print(f"🔗 [SYNC-LOCAL-INFO] Unión de índices: {len(idx_union)} registros únicos")
-
-    # IMPORTANTÍSIMO: reindex devuelve vistas DESORDENADAS → volvemos a ordenar
     buf_idx = buf_idx.reindex(idx_union).sort_index()
     edi_idx = edi_idx.reindex(idx_union).sort_index()
-    print("✅ [SYNC-LOCAL-STEP] Reindexado y ordenado completado")
 
-    # ── Comparación de celdas (tolerante a float/NaN) ───────────────────────
-    print("🔍 [SYNC-LOCAL-STEP] Comparando celdas...")
-    diff_array = ~np.isclose(
-        buf_idx[columnas_mes], edi_idx[columnas_mes], atol=1e-6, equal_nan=True
+    print(
+        f"[SYNC.LOCAL.INFO] shapes buffer={df_buffer.shape} "
+        f"editado={df_editado.shape} union_idx={len(idx_union)}"
     )
-    dif_mask = pd.DataFrame(diff_array, index=buf_idx.index, columns=columnas_mes)
 
-    total_diff = int(dif_mask.values.sum())
-    filas_diff = int(dif_mask.any(axis=1).sum())
-    hay_cambios = total_diff > 0
+    # Comparación tolerante a float/NaN
+    if columnas_mes:
+        diff_array = ~np.isclose(
+            buf_idx[columnas_mes], edi_idx[columnas_mes], atol=1e-6, equal_nan=True
+        )
+        dif_mask = pd.DataFrame(diff_array, index=buf_idx.index, columns=columnas_mes)
 
-    if hay_cambios:
-        print(f"📈 [SYNC-LOCAL-CHANGES] Total celdas modificadas: {total_diff}")
-        print(f"📈 [SYNC-LOCAL-CHANGES] Filas afectadas: {filas_diff}")
-        cols_mod = dif_mask.any().pipe(lambda s: s[s].index.tolist())
-        print(f"📈 [SYNC-LOCAL-CHANGES] Columnas mensuales modificadas: {cols_mod}")
+        total_diff = int(dif_mask.values.sum())
+        filas_diff = int(dif_mask.any(axis=1).sum())
+        hay_cambios = total_diff > 0
 
-        # Aplicar cambios
-        print("🔄 [SYNC-LOCAL-STEP] Aplicando actualizaciones...")
-        buf_idx.update(edi_idx[columnas_mes])
+        if hay_cambios:
+            print(f"[SYNC.CHANGE] cells={total_diff} rows={filas_diff}")
+            # Aplicar cambios de meses
+            buf_idx.update(edi_idx[columnas_mes])
 
-        # Filas completamente nuevas
-        filas_nuevas = dif_mask.index[dif_mask.all(axis=1)]
-        if len(filas_nuevas):
-            print(f"🆕 [SYNC-LOCAL-NEW] Filas nuevas detectadas: {len(filas_nuevas)}")
-            buf_idx.loc[filas_nuevas, columnas_mes] = edi_idx.loc[
-                filas_nuevas, columnas_mes
-            ]
+            # Filas completamente nuevas (todas las columnas-mes distintas)
+            filas_nuevas = dif_mask.index[dif_mask.all(axis=1)]
+            if len(filas_nuevas):
+                print(f"[SYNC.LOCAL.NEW] rows={len(filas_nuevas)}")
+                buf_idx.loc[filas_nuevas, columnas_mes] = edi_idx.loc[
+                    filas_nuevas, columnas_mes
+                ]
+        else:
+            print("[SYNC.LOCAL.INFO] sin_diferencias")
     else:
-        print("✅ [SYNC-LOCAL-INFO] No se detectaron diferencias reales.")
+        # Sin columnas de mes: no cambia nada
+        print("[SYNC.LOCAL.WARN] sin_columnas_mes -> no_changes")
+        hay_cambios = False
 
-    # ── Reconstrucción final con columnas extra ─────────────────────────────
-    #    Calculamos todas las columnas NO-mes ni clave presentes en
-    #    buffer o editado (ItemName, DocCur, etc.)
+    # Reconstrucción con columnas extra (ItemName, DocCur, etc.)
     cols_extra_union = [
         c
         for c in set(df_buffer.columns).union(df_editado.columns)
         if c not in columnas_clave and c not in columnas_mes
     ]
-
+    print(f"[SYNC.LOCAL.INFO] cols_extra={len(cols_extra_union)}")
     if cols_extra_union:
-        print(
-            f"📋 [SYNC-LOCAL-STEP] Procesando {len(cols_extra_union)} columnas extra: {cols_extra_union}"
-        )
-
-        # a) Start with values from buffer (may include NaN)
         buf_idx[cols_extra_union] = df_buffer.set_index(columnas_clave)[
             cols_extra_union
         ].reindex(buf_idx.index)
-
-        # b) Update with non-NaN coming from editado
         edi_extra = df_editado.set_index(columnas_clave)[cols_extra_union].reindex(
             buf_idx.index
         )
         buf_idx.update(edi_extra)
-        print("✅ [SYNC-LOCAL-STEP] Columnas extra actualizadas")
-    else:
-        print("ℹ️  [SYNC-LOCAL-INFO] No hay columnas extra para procesar")
 
-    #   Ensamblamos el DataFrame final
     df_final = buf_idx.reset_index().reindex(columns=columnas_req + cols_extra_union)
 
-    #   Aplicar dtypes solo a columnas presentes
+    # Mantener dtypes de columnas existentes
     dtype_map = {c: t for c, t in df_buffer.dtypes.items() if c in df_final.columns}
     df_final = df_final.astype(dtype_map, errors="ignore")
-    print(f"✅ [SYNC-LOCAL-DTYPES] Dtypes aplicados: {len(dtype_map)} columnas")
+    print(f"[SYNC.LOCAL.INFO] dtypes_aplicados={len(dtype_map)}")
 
-    print(f"🎯 [SYNC-LOCAL-END] Buffer final preparado. Shape: {df_final.shape}")
-    print(f"📊 [SYNC-LOCAL-RESULT] Hay cambios: {hay_cambios}")
-    print(f"📋 [SYNC-LOCAL-COLUMNS] Columnas finales: {list(df_final.columns)}")
-
+    print(
+        f"[SYNC.LOCAL.INFO] end shape={df_final.shape} changes={hay_cambios} "
+        f"elapsed={time.perf_counter()-t0:.3f}s"
+    )
     return df_final, hay_cambios
 
 
 # B_SYN002: Sincronización y guardado individual de buffer editado para cliente
 # # ∂B_SYN002/∂B0
 def sincronizar_para_guardado_final(key_buffer: str, df_editado: pd.DataFrame):
-    print(f"🎯 [SYNC-FINAL-START] Inicio sincronización final - Buffer: {key_buffer}")
-    print(f"📊 [SYNC-FINAL-INFO] DataFrame inicial shape: {df_editado.shape}")
-    print(f"📋 [SYNC-FINAL-INFO] Columnas iniciales: {list(df_editado.columns)}")
-    print(
-        f"🔍 [SYNC-FINAL-INFO] Estado session_state pre-sync: {list(st.session_state.keys())}"
-    )
+    import time
 
-    # 🔀 1) Unificación de métricas Cantidad + Precio
-    print("🔄 [SYNC-FINAL-STEP] Unificando métricas Cantidad + Precio...")
+    t0 = time.perf_counter()
+    print(f"[SYNC.FINAL.INFO] start key={key_buffer}")
+    print(
+        f"[SYNC.FINAL.INFO] df_init shape={df_editado.shape} cols={len(df_editado.columns)}"
+    )
+    print(f"[SYNC.FINAL.INFO] session_keys={len(st.session_state.keys())}")
+
+    # 1) Unificación de métricas Cantidad + Precio
+    t1 = time.perf_counter()
+    print("[SYNC.FINAL.INFO] unify metrics Cantidad+Precio")
     df_editado_unificado = pd.concat(
         [
             df_editado[df_editado["Métrica"] == "Cantidad"],
@@ -510,96 +486,105 @@ def sincronizar_para_guardado_final(key_buffer: str, df_editado: pd.DataFrame):
         ],
         ignore_index=True,
     )
-    print(
-        f"📈 [SYNC-FINAL-INFO] Total filas tras unificación: {len(df_editado_unificado)}"
-    )
     metricas_count = df_editado_unificado["Métrica"].value_counts().to_dict()
-    print(f"📊 [SYNC-FINAL-INFO] Distribución métricas: {metricas_count}")
+    print(
+        f"[SYNC.FINAL.INFO] unified_rows={len(df_editado_unificado)} "
+        f"metric_dist={metricas_count} elapsed={time.perf_counter()-t1:.3f}s"
+    )
 
-    # 🔄 2) Recuperar buffer actual
-    print(f"📂 [SYNC-FINAL-STEP] Recuperando buffer actual: {key_buffer}")
+    # 2) Recuperar buffer actual
+    t2 = time.perf_counter()
+    print(f"[SYNC.FINAL.INFO] load base buffer key={key_buffer}")
     df_base_actual = obtener_buffer_cliente(key_buffer).reset_index()
-    print(f"📊 [SYNC-FINAL-INFO] Buffer base recuperado shape: {df_base_actual.shape}")
-    print(f"📋 [SYNC-FINAL-INFO] Columnas buffer base: {list(df_base_actual.columns)}")
+    print(
+        f"[SYNC.FINAL.INFO] base shape={df_base_actual.shape} "
+        f"cols={len(df_base_actual.columns)} elapsed={time.perf_counter()-t2:.3f}s"
+    )
 
-    # 🔄 3) Sincronizar (ahora devuelve tupla)
-    print("🔄 [SYNC-FINAL-STEP] Ejecutando sincronización buffer local...")
+    # 3) Sincronizar (devuelve tupla)
+    t3 = time.perf_counter()
+    print("[SYNC.FINAL.INFO] run sincronizar_buffer_local")
     df_sync, hay_cambios = sincronizar_buffer_local(
         df_base_actual, df_editado_unificado
     )
-    print(f"📊 [SYNC-FINAL-INFO] Resultado sincronización - Hay cambios: {hay_cambios}")
-    print(f"📈 [SYNC-FINAL-INFO] DataFrame sincronizado shape: {df_sync.shape}")
-
-    if not hay_cambios:
-        print("✅ [SYNC-FINAL-SKIP] Sin cambios reales -> se omite guardado final.")
-        return df_base_actual  # ⬅️  nada más que hacer
-
-    # ---------------------------------------------------------------------
-    # 🔽 Solo se ejecuta esta parte si hay_cambios == True
-    # ---------------------------------------------------------------------
-    print("🚀 [SYNC-FINAL-CHANGES] Procesando cambios detectados...")
     print(
-        f"📋 [SYNC-FINAL-INFO] Columnas post-sincronización: {df_sync.columns.tolist()}"
+        f"[SYNC.FINAL.INFO] sync_result changes={hay_cambios} shape={df_sync.shape} "
+        f"elapsed={time.perf_counter()-t3:.3f}s"
     )
 
-    print("🔍 [SYNC-FINAL-STEP] Analizando cardinalidad de índices...")
-    index_stats = df_sync[["ItemCode", "TipoForecast", "Métrica"]].nunique()
-    print("📊 [SYNC-FINAL-STATS] Cardinalidad post-sync:")
-    print(f"   - ItemCode: {index_stats['ItemCode']}")
-    print(f"   - TipoForecast: {index_stats['TipoForecast']}")
-    print(f"   - Métrica: {index_stats['Métrica']}")
+    if not hay_cambios:
+        print("[SYNC.FINAL.INFO] no_changes -> skip final save")
+        print(
+            f"[SYNC.FINAL.INFO] end shape={df_base_actual.shape} elapsed={time.perf_counter()-t0:.3f}s"
+        )
+        return df_base_actual
+
+    # ──────────────────────────────────────────────────────────────
+    # Solo si hay cambios reales
+    # ──────────────────────────────────────────────────────────────
+    print("[SYNC.FINAL.INFO] process changes")
+    idx_stats = df_sync[["ItemCode", "TipoForecast", "Métrica"]].nunique()
+    print(
+        f"[SYNC.FINAL.INFO] cardinalidad ItemCode={idx_stats['ItemCode']} "
+        f"TipoForecast={idx_stats['TipoForecast']} Metrica={idx_stats['Métrica']}"
+    )
 
     # Validación de nulos en columnas clave
-    print("🔍 [SYNC-FINAL-STEP] Validando nulos en columnas clave...")
-    nulos_detectados = False
+    null_warned = False
     for col in ["ItemCode", "TipoForecast", "Métrica"]:
-        nulos_count = df_sync[col].isna().sum()
-        if nulos_count > 0:
-            print(
-                f"⚠️  [SYNC-FINAL-WARN] Valores nulos detectados en {col}: {nulos_count}"
-            )
-            nulos_detectados = True
-    if not nulos_detectados:
-        print("✅ [SYNC-FINAL-INFO] Sin nulos en columnas clave")
+        nulos = int(df_sync[col].isna().sum())
+        if nulos:
+            print(f"[SYNC.FINAL.WARN] nulls in {col} count={nulos}")
+            null_warned = True
+    if not null_warned:
+        print("[SYNC.FINAL.INFO] no nulls in key columns")
 
-    # 👉 Guardar en session_state ordenado por índice compuesto
-    print("💾 [SYNC-FINAL-STEP] Guardando en session_state...")
-    df_sync = df_sync.set_index(["ItemCode", "TipoForecast", "Métrica"])
-    df_sync = df_sync.sort_index()
+    # Guardar en session_state ordenado por índice compuesto
+    t4 = time.perf_counter()
+    print("[SYNC.FINAL.INFO] save buffer to session_state")
+    df_sync = df_sync.set_index(["ItemCode", "TipoForecast", "Métrica"]).sort_index()
     st.session_state[key_buffer] = df_sync
-    print(f"✅ [SYNC-FINAL-INFO] Buffer guardado en session_state: {key_buffer}")
-
     df_guardar = df_sync.reset_index()
-    print(f"📊 [SYNC-FINAL-INFO] Buffer final para guardado - Filas: {len(df_guardar)}")
-    print(f"📋 [SYNC-FINAL-INFO] Columnas finales: {df_guardar.columns.tolist()}")
+    print(
+        f"[SYNC.FINAL.INFO] saved rows={len(df_guardar)} cols={len(df_guardar.columns)} "
+        f"elapsed={time.perf_counter()-t4:.3f}s"
+    )
 
     # Guardado temporal local
-    print("💾 [SYNC-FINAL-STEP] Guardando temporal local...")
+    t5 = time.perf_counter()
+    print("[SYNC.FINAL.INFO] save temp local")
     guardar_temp_local(key_buffer, df_guardar)
-    print("✅ [SYNC-FINAL-INFO] Guardado temporal completado")
+    print(f"[SYNC.FINAL.INFO] temp local saved elapsed={time.perf_counter()-t5:.3f}s")
 
     # Actualización buffer global
-    print("🌐 [SYNC-FINAL-STEP] Actualizando buffer global...")
+    t6 = time.perf_counter()
+    print("[SYNC.FINAL.INFO] update global buffer")
     actualizar_buffer_global(df_guardar, key_buffer)
-    print("✅ [SYNC-FINAL-INFO] Buffer global actualizado")
+    print(
+        f"[SYNC.FINAL.INFO] global buffer updated elapsed={time.perf_counter()-t6:.3f}s"
+    )
 
-    # ✅ Marcar cliente como editado
+    # Marcar cliente como editado
     cliente = key_buffer.replace("forecast_buffer_", "")
     editados = st.session_state.get("clientes_editados", set())
     editados.add(cliente)
     st.session_state["clientes_editados"] = editados
-    print(f"🏷️  [SYNC-FINAL-INFO] Cliente marcado como editado: {cliente}")
-    print(f"📋 [SYNC-FINAL-INFO] Clientes editados actuales: {len(editados)}")
+    print(f"[SYNC.FINAL.INFO] cliente_editado add={cliente} total={len(editados)}")
 
-    # Nuevos logs de depuración
-    print("🔍 [SYNC-FINAL-DEBUG] Información de depuración adicional:")
-    print(f"   - Hash DataFrame pre-sync: {hash(str(df_editado.values.tobytes()))}")
-    print(f"   - Key buffer: {key_buffer}")
-    print("   - Verificando sincronización en progreso...")
+    # Debug hash (mejor esfuerzo)
+    try:
+        hash_pre = hash_df(df_editado_unificado.sort_index(axis=1))
+    except Exception:
+        try:
+            hash_pre = hash(df_editado_unificado.to_csv(index=False))
+        except Exception:
+            hash_pre = None
+    if hash_pre is not None:
+        print(f"[SYNC.FINAL.INFO] df_pre_sync_hash={hash_pre}")
 
-    print("🎉 [SYNC-FINAL-END] Sincronización final completada exitosamente")
-    print(f"📊 [SYNC-FINAL-RESULT] DataFrame resultante shape: {df_guardar.shape}")
-
+    print(
+        f"[SYNC.FINAL.INFO] end shape={df_guardar.shape} elapsed={time.perf_counter()-t0:.3f}s"
+    )
     return df_guardar
 
 
@@ -629,12 +614,18 @@ def guardar_temp_local(cliente: str, df: pd.DataFrame):
     - Hash estructural estable para evitar escrituras redundantes.
     - Lectura segura (lista blanca) confinada al directorio destino.
     - Escritura atómica (tmp + replace).
+    Logs: [TMP.INFO]/[TMP.WARN]/[TMP.ERROR] en una sola línea, sin emojis.
     """
+
+    t0 = time.perf_counter()
     ruta_str = _ruta_temp(cliente)  # p.ej. ".../tmp/<cliente>.pkl"
     ruta = Path(ruta_str).resolve()
     ruta.parent.mkdir(parents=True, exist_ok=True)
 
     try:
+        rows, cols = getattr(df, "shape", (0, 0))
+        print(f"[TMP.INFO] start cliente={cliente} path={ruta} shape=({rows},{cols})")
+
         df_norm = normalize_df_for_hash(df)
         nuevo_hash = int(hash_pandas_object(df_norm, index=True).sum())
 
@@ -645,17 +636,31 @@ def guardar_temp_local(cliente: str, df: pd.DataFrame):
                 df_prev_norm = normalize_df_for_hash(df_prev)
                 hash_prev = int(hash_pandas_object(df_prev_norm, index=True).sum())
             except Exception as _e:
-                print(f"⚠️  Backup previo ilegible, se reescribirá: {ruta} ({_e})")
+                print(
+                    f"[TMP.WARN] backup_unreadable — will_overwrite path={ruta} err={_e.__class__.__name__}: {str(_e)}"
+                )
 
-        if hash_prev is not None and nuevo_hash == hash_prev:
-            print(f"🟡 Sin cambios para {cliente}, se evita escritura redundante.")
-            return
+        if hash_prev is not None:
+            iguales = nuevo_hash == hash_prev
+            print(
+                f"[TMP.INFO] hash_check new={nuevo_hash} prev={hash_prev} equal={iguales}"
+            )
+            if iguales:
+                print(
+                    f"[TMP.INFO] no_change — skip_write cliente={cliente} path={ruta} elapsed={time.perf_counter()-t0:.3f}s"
+                )
+                return
 
         atomic_pickle_dump(df, ruta)
-        print(f"✅ Backup temporal guardado para {cliente} -> {ruta}")
+        size = ruta.stat().st_size if ruta.exists() else None
+        print(
+            f"[TMP.INFO] saved — cliente={cliente} path={ruta} bytes={size} elapsed={time.perf_counter()-t0:.3f}s"
+        )
 
     except Exception as e:
-        print(f"❌ Error al guardar backup temporal para {cliente}: {e}")
+        print(
+            f"[TMP.ERROR] save_failed — cliente={cliente} path={ruta} err={e.__class__.__name__}: {e} elapsed={time.perf_counter()-t0:.3f}s"
+        )
 
 
 # B_SYN002: Actualización simbólica y persistente del buffer editado en sesión global
@@ -664,43 +669,60 @@ def actualizar_buffer_global(df_editado: pd.DataFrame, key_buffer: str):
     """
     Almacena el DataFrame editado en session_state como buffer vivo.
     Usa clave simbólica con sufijo '_editado' para edición persistente.
+    Logs: [BUFFER.GLOBAL.INFO]/[BUFFER.GLOBAL.WARN]/[BUFFER.GLOBAL.ERROR] en una sola línea.
     """
+    import time
+
+    t0 = time.perf_counter()
     key_state = f"{key_buffer}_editado"
+    rows, cols = df_editado.shape if df_editado is not None else (0, 0)
+    print(f"[BUFFER.GLOBAL.INFO] start key_buffer={key_buffer} rows={rows} cols={cols}")
 
     # Validación estructural mínima
     columnas_requeridas = {"ItemCode", "TipoForecast", "Métrica", "OcrCode3"}
-    if not columnas_requeridas.issubset(df_editado.columns):
-        raise ValueError(
-            f"El DataFrame editado carece de columnas requeridas: {columnas_requeridas}"
-        )
+    faltantes = columnas_requeridas - set(df_editado.columns)
+    if faltantes:
+        msg = f"El DataFrame editado carece de columnas requeridas: {faltantes}"
+        print(f"[BUFFER.GLOBAL.ERROR] missing_columns={faltantes}")
+        raise ValueError(msg)
 
     # Limpieza defensiva
     columnas_prohibidas = ["PrecioUN", "_PrecioUN_", "PrecioUnitario"]
-    df_editado = df_editado.drop(
-        columns=[c for c in columnas_prohibidas if c in df_editado.columns],
-        errors="ignore",
+    a_eliminar = [c for c in columnas_prohibidas if c in df_editado.columns]
+    if a_eliminar:
+        print(f"[BUFFER.GLOBAL.WARN] dropping_forbidden_columns={a_eliminar}")
+        df_editado = df_editado.drop(columns=a_eliminar, errors="ignore")
+
+    # Buffer de edición persistente (copia defensiva)
+    st.session_state[key_state] = df_editado.copy()
+    print(
+        f"[BUFFER.GLOBAL.INFO] session[{key_state}] set rows={len(df_editado)} cols={len(df_editado.columns)}"
     )
 
-    st.session_state[key_state] = df_editado.copy()
-
-    # ✅ Línea esencial para sincronizar buffer principal
+    # ✅ Sincronizar buffer principal con índice compuesto
     st.session_state[key_buffer] = df_editado.set_index(
         ["ItemCode", "TipoForecast", "Métrica"]
     )
+    print(
+        f"[BUFFER.GLOBAL.INFO] session[{key_buffer}] set index=('ItemCode','TipoForecast','Métrica') rows={len(df_editado)}"
+    )
+
     # Marca interna de sincronización
     st.session_state["__buffer_editado__"] = True
+    print("[BUFFER.GLOBAL.INFO] flag __buffer_editado__=True")
+
+    print(
+        f"[BUFFER.GLOBAL.INFO] end key_buffer={key_buffer} elapsed={time.perf_counter()-t0:.3f}s"
+    )
 
 
 # B_VFD001: Validación estructural y de contenido del DataFrame de forecast
 # # ∂B_VFD001/∂B0
 def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
     print("🔍 [VALIDATION-START] Iniciando validación de DataFrame")
-    print(f"📊 [VALIDATION-INFO] DataFrame shape: {df.shape}")
-    print(f"📋 [VALIDATION-INFO] Columnas iniciales: {list(df.columns)}")
 
     errores: list[str] = []
     columnas_mes = [str(m).zfill(2) for m in range(1, 13)]
-    print(f"📅 [VALIDATION-INFO] Columnas mes esperadas: {columnas_mes}")
 
     # Columnas permitidas (base) + opcionales que NO deben gatillar error:
     # 👉 Se agrega explícitamente ItemName (y Linea) para cumplir el punto C.
@@ -716,20 +738,7 @@ def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
 
     df = df.copy()
     df.columns = df.columns.astype(str)
-    print("✅ [VALIDATION-STEP] Columnas convertidas a string")
 
-    # Aviso si viene ItemName/Linea (serán ignoradas en chequeos)
-    if any(c.lower() == "itemname" for c in df.columns):
-        print(
-            "ℹ️ [VALIDATION-INFO] Detectado 'ItemName': será ignorado por el validador (no bloquea)."
-        )
-    if any(c.lower() == "linea" for c in df.columns):
-        print(
-            "ℹ️ [VALIDATION-INFO] Detectado 'Linea': será ignorado por el validador (no bloquea)."
-        )
-
-    # Validación básica (requeridas)
-    print("🔍 [VALIDATION-STEP] Validando campos requeridos...")
     campos_requeridos = ["ItemCode", "TipoForecast", "Métrica", "DocCur"]
     for col in campos_requeridos:
         if col not in df.columns:
@@ -739,7 +748,6 @@ def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
             print(f"✅ [VALIDATION-OK] Columna requerida presente: {col}")
 
     # Normalización de valores clave
-    print("🔄 [VALIDATION-STEP] Normalizando valores clave...")
     if "ItemCode" in df.columns:
         df["ItemCode"] = df["ItemCode"].astype(str).str.strip()
         print(
@@ -762,7 +770,6 @@ def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
         )
 
     # Validaciones de contenido
-    print("🔍 [VALIDATION-STEP] Validando contenido de columnas...")
     if "Métrica" in df.columns:
         if not df["Métrica"].isin(["Cantidad", "Precio"]).all():
             errores.append(
@@ -786,7 +793,6 @@ def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
             print("✅ [VALIDATION-OK] DocCur válidos")
 
     # Validación de columnas mes
-    print("🔍 [VALIDATION-STEP] Validando columnas mensuales...")
     meses_faltantes = [col for col in columnas_mes if col not in df.columns]
     if meses_faltantes:
         errores.append(f"Faltan columnas de mes: {meses_faltantes}")
@@ -795,7 +801,6 @@ def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
         print("✅ [VALIDATION-OK] Todas las columnas mensuales presentes")
 
     # Validación estructural extendida
-    print("🔍 [VALIDATION-STEP] Validando estructura y duplicados...")
     clave_duplicado = ["ItemCode", "TipoForecast", "Métrica", "OcrCode3"]
     if set(clave_duplicado).issubset(df.columns):
         duplicados_mask = df.duplicated(subset=clave_duplicado, keep=False)
@@ -816,7 +821,6 @@ def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
             print("✅ [VALIDATION-OK] Sin duplicados en clave compuesta")
 
     # Validación de columnas residuales sueltas
-    print("🔍 [VALIDATION-STEP] Validando columnas residuales...")
     if "PrecioUN" in df.columns and "Métrica" in df.columns:
         # Si 'Precio' existe, su granularidad debe estar en columnas mensuales, no en una suelta 'PrecioUN'
         if not df[df["Métrica"] == "Precio"].empty:
@@ -826,7 +830,6 @@ def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
             print("❌ [VALIDATION-ERROR] Columna PrecioUN no permitida")
 
     # Validación de columnas inesperadas (tolerando ItemName/Linea)
-    print("🔍 [VALIDATION-STEP] Buscando columnas inesperadas...")
     col_extranas = [
         col
         for col in df.columns
@@ -843,12 +846,10 @@ def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
         return errores
 
     # Validación de tipo de datos y negativos
-    print("🔍 [VALIDATION-STEP] Validando tipos de datos y valores negativos...")
     df[columnas_mes] = df[columnas_mes].apply(pd.to_numeric, errors="coerce").fillna(0)
     print("✅ [VALIDATION-INFO] Columnas mensuales convertidas a numéricas")
 
     # Negativos en cualquiera de las métricas (Cantidad/Precio)
-    print("🔍 [VALIDATION-STEP] Buscando valores negativos...")
     for col in columnas_mes:
         negativos = df[df[col] < 0]
         if not negativos.empty:
@@ -859,7 +860,6 @@ def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
             )
 
     # Validación TipoForecast
-    print("🔍 [VALIDATION-STEP] Validando TipoForecast...")
     if (
         "TipoForecast" in df.columns
         and not df["TipoForecast"].isin(["Firme", "Proyectado"]).all()
@@ -1077,12 +1077,15 @@ def existe_forecast_individual(
 ) -> bool:
     """
     Verifica si existe un forecast individual para un cliente específico.
+    Logs compactos [EXISTE-FORECAST.*], sin emojis.
     """
-    print("🔍 [EXISTE-FORECAST-START] Verificando existencia de forecast individual")
+    import time
+
+    t0 = time.perf_counter()
+
     print(
-        f"📊 [EXISTE-FORECAST-INFO] slpcode: {slpcode}, cardcode: {cardcode}, anio: {anio}"
+        f"[EXISTE-FORECAST.INFO] start slpcode={slpcode} cardcode={cardcode} anio={anio}"
     )
-    print(f"🗄️  [EXISTE-FORECAST-INFO] db_path: {db_path}")
 
     qry = """
         SELECT 1
@@ -1091,30 +1094,29 @@ def existe_forecast_individual(
           AND CardCode = ?
           AND strftime('%Y', FechEntr) = ?
         LIMIT 1
-    """
-    print("📝 [EXISTE-FORECAST-QUERY] Query ejecutada:")
-    print(f"   {qry.strip()}")
+    """.strip()
+
+    print(f"[EXISTE-FORECAST.QUERY] {qry}")
+    print(f"[EXISTE-FORECAST.PARAMS] ({slpcode}, {cardcode!r}, {str(anio)!r})")
+
+    try:
+        df = run_query(qry, params=(slpcode, cardcode, str(anio)), db_path=db_path)
+    except Exception as e:
+        print(f"[EXISTE-FORECAST.ERROR] query_fail err={e.__class__.__name__}: {e}")
+        print(
+            f"[EXISTE-FORECAST.END] exists=False elapsed={time.perf_counter()-t0:.3f}s"
+        )
+        return False
+
+    shape = getattr(df, "shape", None)
+    empty = (df is None) or getattr(df, "empty", True)
+    print(f"[EXISTE-FORECAST.RESULT] shape={shape} empty={empty}")
+
+    exists = not empty
     print(
-        f"📋 [EXISTE-FORECAST-PARAMS] Parámetros: ({slpcode}, '{cardcode}', '{anio}')"
+        f"[EXISTE-FORECAST.END] exists={exists} elapsed={time.perf_counter()-t0:.3f}s"
     )
-
-    df = run_query(qry, params=(slpcode, cardcode, str(anio)), db_path=db_path)
-    print(f"📊 [EXISTE-FORECAST-RESULT] Resultado query - shape: {df.shape}")
-    print(f"📈 [EXISTE-FORECAST-INFO] DataFrame vacío: {df.empty}")
-
-    existe = not df.empty
-
-    if existe:
-        print(
-            f"✅ [EXISTE-FORECAST-FOUND] Forecast individual EXISTE para el cliente {cardcode}"
-        )
-    else:
-        print(
-            f"❌ [EXISTE-FORECAST-NOTFOUND] Forecast individual NO EXISTE para el cliente {cardcode}"
-        )
-
-    print(f"🎯 [EXISTE-FORECAST-END] Resultado: {existe}")
-    return existe
+    return exists
 
 
 # B_FEN002: Inserción de detalle de forecast a SQL (Forecast_Detalle)
@@ -1130,13 +1132,17 @@ def insertar_forecast_detalle(
     ▸ NO inserta Cant==0 (bajas se materializan con DELETE puntual).
     ▸ Construye FechEntr desde anio+Mes (YYYY-MM-01).
     ▸ Crea índice único para habilitar UPSERT.
+    Logs compactos y consistentes: [DETALLE.INFO]/[DETALLE.WARN]/[DETALLE.ERROR] + [METRICAS].
     """
+    import time
 
+    t0 = time.perf_counter()
     print(
-        f"[DEBUG-DETALLE] ▶ Iniciando inserción de detalle para ForecastID={forecast_id}"
+        f"[DETALLE.START] insertar_forecast_detalle forecast_id={forecast_id} anio={anio}"
     )
+
     if not forecast_id or forecast_id < 0:
-        raise ValueError(f"[ERROR-DETALLE] ❌ ForecastID inválido: {forecast_id}")
+        raise ValueError(f"[DETALLE.ERROR] ForecastID inválido: {forecast_id}")
 
     required = {
         "CardCode",
@@ -1152,11 +1158,11 @@ def insertar_forecast_detalle(
     }
     missing = required - set(df_detalle.columns)
     if missing:
-        raise ValueError(f"[ERROR-DETALLE] ❌ Faltan columnas requeridas: {missing}")
+        raise ValueError(f"[DETALLE.ERROR] Faltan columnas requeridas: {missing}")
 
     # 0) Normalización
     df = df_detalle.copy()
-    print(f"[DEBUG-DETALLE] Registros a procesar (original): {len(df)}")
+    print(f"[DETALLE.INFO] rows_in={len(df)}")
 
     df["Mes"] = df["Mes"].astype(str).str.zfill(2)
     df["Cant"] = (
@@ -1178,37 +1184,28 @@ def insertar_forecast_detalle(
         "SlpCode",
     ]
     dup_counts = df.groupby(clave_lote).size().reset_index(name="count")
-    print("[DEBUG-SAVE-INSERT] Verificando duplicados antes de inserción:")
-    print(
-        dup_counts[["ItemCode", "TipoForecast", "Mes", "count"]].to_string(index=False)
-    )
-    if (dup_counts["count"] > 1).any():
-        print(
-            "[⚠️ DEBUG-DETALLE] Lote contiene claves duplicadas. Se tomará la ÚLTIMA ocurrencia (no se sumará)."
-        )
-        # Mantener última ocurrencia por clave del lote
-        df = df.sort_index()  # si el orden de llegada importa; ajusta según tu pipeline
-        df = df.drop_duplicates(subset=clave_lote, keep="last")
+    dup_keys = int((dup_counts["count"] > 1).sum())
+    print(f"[DETALLE.INFO] check_dups keys_duplicadas={dup_keys}")
+    if dup_keys:
+        print("[DETALLE.WARN] lote_duplicados keep=last (no suma)")
+        df = df.sort_index().drop_duplicates(subset=clave_lote, keep="last")
 
     # 2) Construir FechEntr = YYYY-MM-01
     df["FechEntr"] = pd.to_datetime(
         df["Mes"].radd(f"{anio}-"), format="%Y-%m", errors="coerce"
     ).dt.strftime("%Y-%m-01")
     if df["FechEntr"].isna().any():
-        errores = df[df["FechEntr"].isna()]
-        print("[ERROR-DETALLE] ❌ FechEntr inválidas detectadas en:")
-        print(errores[["ItemCode", "TipoForecast", "Mes"]].to_string(index=False))
+        errores = df[df["FechEntr"].isna()][["ItemCode", "TipoForecast", "Mes"]]
+        print(f"[DETALLE.ERROR] fechentr_invalid rows={len(errores)}")
         raise ValueError("Mes inválido: no se pudo construir FechEntr.")
 
-    print("[DEBUG-DETALLE] Fechas generadas (FechEntr):")
+    sample_fech = ", ".join(df["FechEntr"].dropna().astype(str).unique()[:3])
     print(
-        df[["ItemCode", "TipoForecast", "FechEntr"]]
-        .drop_duplicates()
-        .head(5)
-        .to_string(index=False)
+        f"[DETALLE.INFO] fechas_generadas uniq={df['FechEntr'].nunique()} sample=[{sample_fech}]"
     )
 
     # 3) Índice único para habilitar UPSERT (idempotencia)
+    t_idx = time.perf_counter()
     _run_forecast_write(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS ux_ForecastDetalle
@@ -1220,14 +1217,17 @@ def insertar_forecast_detalle(
         many=False,
         db_path=db_path,
     )
+    print(f"[DETALLE.INFO] index_ready elapsed={time.perf_counter()-t_idx:.3f}s")
 
     # 4) Particionar BAJAS (Cant==0) vs UPserts (Cant>0)
     df_bajas = df[df["Cant"] == 0.0].copy()
     df_upsert = df[df["Cant"] > 0.0].copy()
+    print(f"[DETALLE.INFO] partitions bajas={len(df_bajas)} upsert={len(df_upsert)}")
 
     # 4.a) BAJAS: DELETE puntual por clave COMPLETA
     rows_deleted = 0
     if not df_bajas.empty:
+        t_del = time.perf_counter()
         tuplas_delete = [
             (
                 forecast_id,
@@ -1258,10 +1258,14 @@ def insertar_forecast_detalle(
             db_path=db_path,
         )
         rows_deleted = len(tuplas_delete)
+        print(
+            f"[DETALLE.INFO] delete_applied rows={rows_deleted} elapsed={time.perf_counter()-t_del:.3f}s"
+        )
 
     # 4.b) ALTAS/MODIF: UPSERT (NO insertamos ceros)
     rows_upserted = 0
     if not df_upsert.empty:
+        t_ins = time.perf_counter()
         tuplas_upsert = [
             (
                 forecast_id,
@@ -1278,9 +1282,7 @@ def insertar_forecast_detalle(
             )
             for _, r in df_upsert.iterrows()
         ]
-        print(
-            f"[DEBUG-DETALLE] Insertando/Actualizando {len(tuplas_upsert)} registros (UPSERT)..."
-        )
+        print(f"[DETALLE.INFO] upsert rows={len(tuplas_upsert)}")
         _run_forecast_write(
             """
             INSERT INTO Forecast_Detalle (
@@ -1299,13 +1301,17 @@ def insertar_forecast_detalle(
             db_path=db_path,
         )
         rows_upserted = len(tuplas_upsert)
+        print(
+            f"[DETALLE.INFO] upsert_done rows={rows_upserted} elapsed={time.perf_counter()-t_ins:.3f}s"
+        )
 
     total_cant = float(df_upsert["Cant"].sum()) if not df_upsert.empty else 0.0
-    print("[DEBUG-DETALLE] ✅ Inserción finalizada.")
     print(
         f"[METRICAS] rows_deleted={rows_deleted}, rows_upserted={rows_upserted}, zero_transitions_applied={len(df_bajas)}"
     )
-    print(f"[DEBUG-DETALLE] Total Cantidad (solo Cant>0): {total_cant:,.2f}")
+    print(
+        f"[DETALLE.END] total_cantidad_pos={total_cant:,.2f} elapsed={time.perf_counter()-t0:.3f}s"
+    )
 
 
 # B_FEN004: Inserción de cabecera Forecast (SlpCode + Fecha_Carga)
@@ -1331,51 +1337,45 @@ def obtener_forecast_activo(
     """
     Devuelve un ForecastID único por cliente y día.
     No consulta la tabla Forecast; se basa en session_state.
+    Logs compactos, sin emojis.
     """
-    print("🔍 [FORECAST-ACTIVO-START] Obteniendo forecast activo")
+    import time
+
+    t0 = time.perf_counter()
+    print("[FORECAST-ACTIVO-START] obtener_forecast_activo")
     print(
-        f"📊 [FORECAST-ACTIVO-INFO] slpcode: {slpcode}, cardcode: {cardcode}, anio: {anio}"
+        f"[FORECAST-ACTIVO-INFO] slpcode={slpcode} cardcode={cardcode} anio={anio} force_new={force_new}"
     )
-    print(f"⚡ [FORECAST-ACTIVO-INFO] force_new: {force_new}, db_path: {db_path}")
 
     llave = f"forecast_activo_{slpcode}_{cardcode}_{anio}"
-    print(f"🔑 [FORECAST-ACTIVO-INFO] Llave session_state: {llave}")
+    print(f"[FORECAST-ACTIVO-INFO] session_key={llave}")
 
-    # Verificar si ya existe en session_state
+    # Cache: reutiliza si no se fuerza uno nuevo
     if not force_new and llave in st.session_state:
         forecast_id = st.session_state[llave]
+        activos = sum(k.startswith("forecast_activo_") for k in st.session_state.keys())
         print(
-            f"✅ [FORECAST-ACTIVO-CACHE] ForecastID encontrado en cache: {forecast_id}"
-        )
-        print(
-            f"📋 [FORECAST-ACTIVO-INFO] Estado session_state keys: {list(st.session_state.keys())}"
+            f"[FORECAST-ACTIVO.CACHE] hit id={forecast_id} active_keys={activos} elapsed={time.perf_counter()-t0:.3f}s"
         )
         return forecast_id
 
-    print("🆕 [FORECAST-ACTIVO-NEW] Creando nuevo forecast (force_new o no en cache)")
-
-    # Siempre crea un ID nuevo si force_new=True o no existe en sesión
-    print("📝 [FORECAST-ACTIVO-STEP] Registrando cabecera en BD...")
+    # Crear uno nuevo
+    print("[FORECAST-ACTIVO-NEW] creating_new (cache_miss or force_new=True)")
+    t1 = time.perf_counter()
     forecast_id = registrar_forecast_cabecera(slpcode, db_path)
-    print(f"✅ [FORECAST-ACTIVO-REGISTER] ForecastID registrado: {forecast_id}")
+    print(
+        f"[FORECAST-ACTIVO-REGISTER] id={forecast_id} db_elapsed={time.perf_counter()-t1:.3f}s"
+    )
 
-    # Guardar en session_state
     st.session_state[llave] = forecast_id
+    activos = sum(k.startswith("forecast_activo_") for k in st.session_state.keys())
     print(
-        f"💾 [FORECAST-ACTIVO-SAVE] ForecastID guardado en session_state: {forecast_id}"
+        f"[FORECAST-ACTIVO-SAVE] cached key={llave} id={forecast_id} active_keys={activos}"
     )
 
-    # Mostrar estado actual de session_state
-    forecast_keys = [
-        k for k in st.session_state.keys() if k.startswith("forecast_activo_")
-    ]
     print(
-        f"📋 [FORECAST-ACTIVO-INFO] Forecasts activos en session_state: {len(forecast_keys)}"
+        f"[FORECAST-ACTIVO-END] id={forecast_id} elapsed={time.perf_counter()-t0:.3f}s"
     )
-    if forecast_keys:
-        print(f"   - Keys: {forecast_keys}")
-
-    print(f"🎯 [FORECAST-ACTIVO-END] ForecastID retornado: {forecast_id}")
     return forecast_id
 
 
@@ -1389,62 +1389,72 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
     - (✔) Resets y hashing intactos; recuperación post-error solo si hubo ForecastID.
     - (✔) Logs más explícitos y defensas adicionales.
     """
+    import time
     import numpy as np
     import pandas as pd  # ← Asegura disponibilidad de pd dentro de la función
 
-    print("[DEBUG-SAVE-MAIN] 🚀 Iniciando proceso de guardado")
-    print(f"[DEBUG-SAVE-MAIN] Session state actual: {list(st.session_state.keys())}")
+    t0 = time.perf_counter()
+    print("[SAVE.INFO] start")
     print(
-        f"[DEBUG-SAVE-MAIN] Clientes editados: {st.session_state.get('clientes_editados', set())}"
+        f"[SAVE.INFO] clientes_editados={st.session_state.get('clientes_editados', set())}"
     )
 
     clientes = st.session_state.get("clientes_editados", set()).copy()
-    print(f"[DEBUG-GUARDADO] Clientes a procesar: {sorted(clientes)}")
+    print(f"[SAVE.INFO] to_process={sorted(clientes)}")
     if not clientes:
+        print(f"[SAVE.INFO] no_changes elapsed={time.perf_counter()-t0:.3f}s")
         st.info("✅ No hay cambios pendientes por guardar")
         return
-
-    print("[DEBUG-SAVE-BATCH] Inicio de guardado batch")
-    print(f"[DEBUG-SAVE-BATCH] Total clientes a procesar: {len(clientes)}")
-    print(f"[DEBUG-SAVE-BATCH] Estado session_state antes: {dict(st.session_state)}")
 
     # Helper local para la clave de cache del forecast activo
     def _forecast_activo_cache_key(slpcode: int, cardcode: str, anio: int) -> str:
         return f"forecast_activo_{slpcode}_{cardcode}_{anio}"
 
     for cliente in clientes:
+        t_cli = time.perf_counter()
         key_buffer = f"forecast_buffer_{cliente}"
         forecast_id = None  # ← Definido temprano para manejo en try/except
-        print(f"\n[DEBUG-SAVE-MAIN] 📝 Procesando cliente: {cliente}")
-        print(f"[DEBUG-SAVE-MAIN] Buffer key: {key_buffer}")
-        print(
-            f"[DEBUG-SAVE-MAIN] Estado buffer pre-guardado: {st.session_state.get(key_buffer, 'No existe')}"
-        )
 
-        if key_buffer not in st.session_state:
-            print(f"[WARN] Buffer no encontrado en sesión para {cliente}")
+        # Estado previo (resumen, sin volcar dataframes gigantes)
+        buf_val = st.session_state.get(key_buffer, None)
+        if buf_val is None:
+            print(f"[SAVE.WARN] buffer_missing cliente={cliente} key={key_buffer}")
             st.warning(f"⚠️ No se encontró buffer para cliente {cliente}.")
             continue
+        else:
+            try:
+                if hasattr(buf_val, "shape"):
+                    print(
+                        f"[SAVE.INFO] processing cliente={cliente} key={key_buffer} pre.shape={buf_val.shape}"
+                    )
+                else:
+                    print(
+                        f"[SAVE.INFO] processing cliente={cliente} key={key_buffer} pre.type={type(buf_val).__name__}"
+                    )
+            except Exception:
+                print(
+                    f"[SAVE.INFO] processing cliente={cliente} key={key_buffer} pre=uninspectable"
+                )
 
         try:
             df_base = st.session_state[key_buffer].reset_index()
             slpcode = int(obtener_slpcode())
 
-            print(f"\n[DEBUG-GUARDADO] CLIENTE {cliente}")
             print(
-                f"[DEBUG-GUARDADO] Paso 1: DF_BASE (filas={len(df_base)}) columnas={df_base.columns.tolist()}"
+                f"[SAVE.STEP] 1/9 df_base rows={len(df_base)} cols={len(df_base.columns)}"
             )
-            print(df_base.head(3).to_string(index=False))
+            try:
+                print(df_base.head(3).to_string(index=False))
+            except Exception as e_head:
+                print(f"[SAVE.WARN] df_base_preview_unavailable err={e_head}")
 
             if df_base.empty:
-                print(
-                    f"[DEBUG-GUARDADO] DF_BASE está vacío. Se omite cliente {cliente}"
-                )
+                print(f"[SAVE.INFO] df_base_empty skip cliente={cliente}")
                 continue
 
             # 1) Transformación a largo (usa tu función probada)
             df_largo = df_forecast_metrico_to_largo(df_base, anio, cliente, slpcode)
-            print(f"[DEBUG-GUARDADO] Paso 2: DF_LARGO generado (filas={len(df_largo)})")
+            print(f"[SAVE.STEP] 2/9 df_largo rows={len(df_largo)}")
             try:
                 print(
                     df_largo[["ItemCode", "TipoForecast", "Mes", "Cant"]]
@@ -1452,18 +1462,16 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                     .to_string(index=False)
                 )
             except Exception as e_head:
-                print(
-                    f"[DEBUG-GUARDADO] (no se pudo imprimir preview DF_LARGO) {e_head}"
-                )
+                print(f"[SAVE.WARN] df_largo_preview_unavailable err={e_head}")
 
             if df_largo.empty:
-                print(f"[DEBUG-GUARDADO] 🟡 DF_LARGO vacío, se omite cliente {cliente}")
+                print(f"[SAVE.INFO] df_largo_empty skip cliente={cliente}")
                 st.info(f"ℹ️ Sin datos para guardar en cliente {cliente}.")
                 continue
 
             # 2) Buscar histórico previo (ANTES de crear nueva cabecera)
             forecast_id_prev = _get_forecast_id_prev(slpcode, cliente, anio, db_path)
-            print(f"[DEBUG-GUARDADO] Paso 3: ForecastID anterior = {forecast_id_prev}")
+            print(f"[SAVE.STEP] 3/9 forecast_prev_id={forecast_id_prev}")
 
             # 3) Enriquecer + filtrar contra histórico
             modo_individual = existe_forecast_individual(
@@ -1479,15 +1487,10 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                 incluir_deltas_cero_si_es_individual=modo_individual,
                 forzar_incluir_todos=(forecast_id_prev is None),
             )
-            print(
-                f"[DEBUG-GUARDADO] Paso 4: Cambios reales detectados = {len(df_largo_filtrado)}"
-            )
+            print(f"[SAVE.STEP] 4/9 cambios_reales={len(df_largo_filtrado)}")
 
             if df_largo_filtrado.empty:
-                # (✔) No creamos cabecera si no hay cambios → evita Forecast_Header huérfano
-                print(
-                    f"[DEBUG-GUARDADO] ⏩ Sin cambios reales. Cliente omitido: {cliente}"
-                )
+                print(f"[SAVE.INFO] no_real_changes skip cliente={cliente}")
                 st.info(
                     f"⏩ Cliente {cliente}: sin cambios reales. Se omite inserción."
                 )
@@ -1495,16 +1498,15 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                 continue
 
             # 4) Crear SIEMPRE nueva cabecera SOLO cuando hay cambios
-            #    (✔) force_new=True garantiza ForecastID nuevo por cada “Guardar”
             forecast_id = obtener_forecast_activo(
                 slpcode, cliente, anio, db_path, force_new=False
             )
             print(
-                f"[DEBUG-GUARDADO] Paso 5: ForecastID nuevo = {forecast_id}, anterior = {forecast_id_prev}"
+                f"[SAVE.STEP] 5/9 forecast_new_id={forecast_id} prev_id={forecast_id_prev}"
             )
 
             # 5) Logging delta (antes de insertar)
-            print("[DEBUG-GUARDADO] Paso 6: Logging de diferencias previas a inserción")
+            print("[SAVE.STEP] 6/9 registrar_log_detalle_cambios")
             registrar_log_detalle_cambios(
                 slpcode,
                 cliente,
@@ -1516,19 +1518,20 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
             )
 
             # 6) Inserción / UPSERT
-            print("[DEBUG-GUARDADO] Paso 7: Insertando forecast detalle en BD")
+            print("[SAVE.STEP] 7/9 insertar_forecast_detalle")
             print(
-                f"[DEBUG-SAVE-INSERT] Preparando inserción para ForecastID={forecast_id}"
+                f"[SAVE.INSERT.INFO] prep forecast_id={forecast_id} shape={df_largo_filtrado.shape}"
             )
-            print(
-                f"[DEBUG-SAVE-INSERT] Shape del DataFrame a insertar: {df_largo_filtrado.shape}"
-            )
-            print("[DEBUG-SAVE-INSERT] Verificando duplicados antes de inserción:")
-            print(
-                df_largo_filtrado.groupby(["ItemCode", "TipoForecast", "Mes"])
-                .size()
-                .reset_index(name="count")
-            )
+            print("[SAVE.INSERT.INFO] dups_check preview:")
+            try:
+                print(
+                    df_largo_filtrado.groupby(["ItemCode", "TipoForecast", "Mes"])
+                    .size()
+                    .reset_index(name="count")
+                    .to_string(index=False)
+                )
+            except Exception as e_dups:
+                print(f"[SAVE.WARN] dups_preview_unavailable err={e_dups}")
 
             insertar_forecast_detalle(
                 df_largo_filtrado.assign(ForecastID=forecast_id),
@@ -1536,42 +1539,38 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                 anio,
                 db_path,
             )
-            print("[DEBUG-SAVE-INSERT] Inserción completada")
-            print(
-                f"[DEBUG-SAVE-INSERT] Estado session_state después: {dict(st.session_state)}"
-            )
+            print("[SAVE.INSERT.INFO] done")
+            print(f"[SAVE.DEBUG] session_state_keys={len(st.session_state.keys())}")
 
             # 7) Refrescar SIEMPRE el buffer UI desde BD (4×12 garantizado)
-            print(
-                "[DEBUG-GUARDADO] Paso 8: Refrescando buffer UI post-guardado (4×12 garantizado)"
-            )
+            print("[SAVE.STEP] 8/9 refresh_buffer_ui")
             _refrescar_buffer_ui(forecast_id, key_buffer, db_path)
 
-            # Verificación de forma (4 filas por base: Cantidad/Precio × Firme/Proyectado)
+            # Verificación 4×12
             try:
                 df_ui = st.session_state[key_buffer].reset_index()
                 base = df_ui[["ItemCode", "OcrCode3", "DocCur"]].drop_duplicates()
                 expected = len(base) * 4
                 real = len(df_ui)
                 print(
-                    f"[DEBUG-GUARDADO] Verificación 4×12 → bases={len(base)} | esperado={expected} | real={real}"
+                    f"[SAVE.INFO] verify_4x12 bases={len(base)} expected={expected} real={real}"
                 )
                 if real != expected:
                     print(
-                        "[WARN] El buffer UI no quedó en múltiplos de 4 filas por base. Revisar _refrescar_buffer_ui."
+                        "[SAVE.WARN] ui_rows_not_multiple_of_4 review _refrescar_buffer_ui"
                     )
             except Exception as e_check:
-                print(f"[DEBUG-GUARDADO] (no se pudo verificar 4×12) {e_check}")
+                print(f"[SAVE.WARN] verify_4x12_failed err={e_check}")
 
             # 8) RESET del editor y marcas de edición
-            print("[DEBUG-GUARDADO] Paso 9: Reseteando estado de edición UI")
+            print("[SAVE.STEP] 9/9 reset_ui_edit_state")
             _reset_estado_edicion_por_cliente(cliente, key_buffer)
 
-            # (✔) Limpieza explícita del cache del ForecastID activo para evitar reutilización en el próximo guardado
+            # Limpieza cache ForecastID activo
             cache_key = _forecast_activo_cache_key(slpcode, cliente, anio)
             if cache_key in st.session_state:
                 print(
-                    f"[DEBUG-GUARDADO] Limpieza de cache ForecastID activo: {cache_key} -> {st.session_state[cache_key]}"
+                    f"[SAVE.INFO] clear_active_forecast_cache key={cache_key} value={st.session_state[cache_key]}"
                 )
                 del st.session_state[cache_key]
 
@@ -1581,34 +1580,30 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                 h = pd.util.hash_pandas_object(df_for_hash, index=False).sum()
                 st.session_state[f"{key_buffer}_hash"] = np.uint64(h & ((1 << 64) - 1))
                 print(
-                    f"[DEBUG-GUARDADO] Hash actualizado para {key_buffer}: {st.session_state[f'{key_buffer}_hash']}"
+                    f"[SAVE.INFO] buffer_hash_updated key={key_buffer} hash={st.session_state[f'{key_buffer}_hash']}"
                 )
             except Exception as e_hash:
-                print(
-                    f"[DEBUG-GUARDADO] ⚠️ No se pudo calcular hash para {key_buffer}: {e_hash}"
-                )
+                print(f"[SAVE.WARN] buffer_hash_failed key={key_buffer} err={e_hash}")
 
             st.success(
                 f"✅ Cliente {cliente} guardado correctamente (ForecastID={forecast_id})."
             )
+            print(
+                f"[SAVE.INFO] cliente_done cliente={cliente} forecast_id={forecast_id} elapsed={time.perf_counter()-t_cli:.3f}s"
+            )
 
         except Exception as e:
-            print(
-                f"[ERROR-GUARDADO] ❌ Excepción durante guardado de cliente {cliente}: {e}"
-            )
+            cls = e.__class__.__name__
+            print(f"[SAVE.ERROR] cliente={cliente} exc={cls} msg={e}")
             st.error(f"❌ Error al guardar cliente {cliente}: {e}")
 
             # Recuperación visual mínima SOLO si hubo ForecastID (evita query con None)
             try:
                 if forecast_id is None:
-                    print(
-                        "[DEBUG-GUARDADO] ↩ Sin ForecastID generado; se omite refresco alternativo."
-                    )
+                    print("[SAVE.INFO] recovery_skip_no_forecast_id")
                     continue
 
-                print(
-                    "[DEBUG-GUARDADO] ↩ Intentando refresco alternativo por error de escritura"
-                )
+                print("[SAVE.INFO] recovery_try_refresh_from_db")
                 qry_ultimo = """
                     SELECT ItemCode, TipoForecast, OcrCode3, Linea, DocCur, Mes, 
                            SUM(Cant)     AS Cant, 
@@ -1630,10 +1625,7 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                 """
                 df_post = run_query(qry_ultimo, params=(forecast_id,), db_path=db_path)
                 if not df_post.empty:
-                    print(
-                        "[DEBUG-GUARDADO] Recuperación post-error OK. DF post shape:",
-                        df_post.shape,
-                    )
+                    print(f"[SAVE.INFO] recovery_ok df_post.shape={df_post.shape}")
                     cols_meses = [f"{m:02d}" for m in range(1, 13)]
                     df_cant, df_prec = df_post.copy(), df_post.copy()
                     df_cant["Métrica"] = "Cantidad"
@@ -1681,87 +1673,94 @@ def guardar_todos_los_clientes_editados(anio: int, db_path: str = DB_PATH):
                     )
                     _reset_estado_edicion_por_cliente(cliente, key_buffer)
             except Exception as e2:
+                cls2 = e2.__class__.__name__
                 print(
-                    f"[ERROR-GUARDADO] ❌ Falló refresco post-error para {cliente}: {e2}"
+                    f"[SAVE.ERROR] recovery_failed cliente={cliente} exc={cls2} msg={e2}"
                 )
                 st.error(
                     f"❌ Error crítico al intentar refrescar buffer de cliente {cliente}: {e2}"
                 )
 
-    print("[DEBUG-GUARDADO] 🧼 Limpiando lista de clientes_editados")
+    print("[SAVE.INFO] cleanup_clientes_editados")
     st.session_state.pop("clientes_editados", None)
+    print(f"[SAVE.INFO] end elapsed={time.perf_counter()-t0:.3f}s")
 
 
 def _get_forecast_id_prev(
     slpcode: int, cardcode: str, anio: int, db_path: str
 ) -> Optional[int]:
     """
-    Busca el ForecastID MÁS RECIENTE para un cliente (CardCode) y vendedor (SlpCode)
-    que sea INMEDIATAMENTE ANTERIOR al que se va a crear.
+    Devuelve el ForecastID inmediatamente anterior (por Fecha_Carga) para
+    (SlpCode, CardCode, año). Si no hay por cliente, intenta por SlpCode (fallback).
     """
-    print("🔍 [FORECAST-PREV-START] Buscando forecast histórico INMEDIATO")
-    print(
-        f"📊 [FORECAST-PREV-INFO] slpcode: {slpcode}, cardcode: {cardcode}, anio: {anio}"
-    )
-    print(f"🗄️  [FORECAST-PREV-INFO] db_path: {db_path}")
+    import time
+    from datetime import datetime
 
-    # 1. Buscar el ForecastID más reciente para este cliente y año
-    print("🔍 [FORECAST-PREV-STEP] Buscando forecast más reciente...")
-    qry_reciente = """
-        SELECT MAX(fd.ForecastID) AS id
-        FROM   Forecast_Detalle fd
-        JOIN   Forecast f ON fd.ForecastID = f.ForecastID
-        WHERE  fd.SlpCode  = ?
-          AND  fd.CardCode = ?
-          AND  strftime('%Y', fd.FechEntr) = ?
-          AND  f.Fecha_Carga < datetime('now')
+    logp = "[FORECAST.PREV]"
+    print(
+        f"{logp} start slpcode={slpcode} cardcode={cardcode} anio={anio} db={db_path}"
+    )
+
+    # Ventana anual sargable
+    y0 = f"{anio}-01-01"
+    y1 = f"{anio + 1}-01-01"
+    now_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"{logp} window y0={y0} y1={y1} now={now_ts}")
+
+    # 1) Cliente + año (ordenado por Fecha_Carga real)
+    qry_cli = """
+        SELECT f.ForecastID, f.Fecha_Carga
+        FROM Forecast_Detalle fd
+        JOIN Forecast f ON f.ForecastID = fd.ForecastID
+        WHERE fd.SlpCode = ?
+          AND fd.CardCode = ?
+          AND fd.FechEntr >= ?
+          AND fd.FechEntr <  ?
+          AND f.Fecha_Carga < ?
+        ORDER BY f.Fecha_Carga DESC, f.ForecastID DESC
+        LIMIT 1
     """
-    print(f"📝 [FORECAST-PREV-QUERY] Query reciente: {qry_reciente.strip()}")
-    print(
-        f"📋 [FORECAST-PREV-PARAMS] Params: slpcode={slpcode}, cardcode={cardcode}, anio={anio}"
+    t0 = time.perf_counter()
+    df_cli = run_query(
+        qry_cli, params=(slpcode, cardcode, y0, y1, now_ts), db_path=db_path
     )
+    t1 = time.perf_counter()
+    shape_cli = None if df_cli is None else df_cli.shape
+    print(f"{logp} q.client shape={shape_cli} elapsed={t1 - t0:0.3f}s")
 
-    df_reciente = run_query(
-        qry_reciente, params=(slpcode, cardcode, str(anio)), db_path=db_path
-    )
-    print(f"📊 [FORECAST-PREV-RESULT] Resultado reciente - shape: {df_reciente.shape}")
+    if df_cli is not None and not df_cli.empty:
+        fid = int(df_cli.iloc[0]["ForecastID"])
+        ts = str(df_cli.iloc[0]["Fecha_Carga"])
+        print(f"{logp} found client ForecastID={fid} fecha_carga={ts}")
+        return fid
 
-    if not df_reciente.empty and pd.notna(df_reciente.iloc[0].id):
-        forecast_id = int(df_reciente.iloc[0].id)
-        print(
-            f"✅ [FORECAST-PREV-FOUND] ForecastID inmediato anterior encontrado: {forecast_id}"
-        )
-        return forecast_id
-    else:
-        print("❌ [FORECAST-PREV-NOTFOUND] No se encontró forecast inmediato anterior")
+    print(f"{logp} no client record, trying fallback by slpcode")
 
-    # 2. Fallback: Buscar cualquier forecast global para el mismo SlpCode
-    print("🔍 [FORECAST-PREV-STEP] Buscando forecast global (fallback)...")
-    qry_global = """
-        SELECT MAX(fd.ForecastID) AS id
-        FROM   Forecast_Detalle fd
-        JOIN   Forecast f ON fd.ForecastID = f.ForecastID
-        WHERE  fd.SlpCode  = ?
-          AND  strftime('%Y', fd.FechEntr) = ?
-          AND  f.Fecha_Carga < datetime('now')
+    # 2) Fallback: SlpCode + año (sin CardCode)
+    qry_slp = """
+        SELECT f.ForecastID, f.Fecha_Carga
+        FROM Forecast_Detalle fd
+        JOIN Forecast f ON f.ForecastID = fd.ForecastID
+        WHERE fd.SlpCode = ?
+          AND fd.FechEntr >= ?
+          AND fd.FechEntr <  ?
+          AND f.Fecha_Carga < ?
+        ORDER BY f.Fecha_Carga DESC, f.ForecastID DESC
+        LIMIT 1
     """
-    print(f"📝 [FORECAST-PREV-QUERY] Query global: {qry_global.strip()}")
-    print(f"📋 [FORECAST-PREV-PARAMS] Params: slpcode={slpcode}, anio={anio}")
+    t2 = time.perf_counter()
+    df_slp = run_query(qry_slp, params=(slpcode, y0, y1, now_ts), db_path=db_path)
+    t3 = time.perf_counter()
+    shape_slp = None if df_slp is None else df_slp.shape
+    print(f"{logp} q.fallback shape={shape_slp} elapsed={t3 - t2:0.3f}s")
 
-    df_glob = run_query(qry_global, params=(slpcode, str(anio)), db_path=db_path)
-    print(f"📊 [FORECAST-PREV-RESULT] Resultado global - shape: {df_glob.shape}")
+    if df_slp is not None and not df_slp.empty:
+        fid = int(df_slp.iloc[0]["ForecastID"])
+        ts = str(df_slp.iloc[0]["Fecha_Carga"])
+        print(f"{logp} found fallback ForecastID={fid} fecha_carga={ts}")
+        return fid
 
-    if not df_glob.empty and pd.notna(df_glob.iloc[0].id):
-        forecast_id = int(df_glob.iloc[0].id)
-        print(f"✅ [FORECAST-PREV-FOUND] ForecastID global encontrado: {forecast_id}")
-        return forecast_id
-    else:
-        print("❌ [FORECAST-PREV-NOTFOUND] No se encontró forecast global")
-
-    print(
-        "⚠️  [FORECAST-PREV-END] No se encontró forecast histórico (ni inmediato anterior ni global)"
-    )
-    print("🆕 [FORECAST-PREV-INFO] Se partirá desde cero (forecast nuevo)")
+    print(f"{logp} not_found (client nor fallback); will start from scratch")
     return None
 
 
@@ -1826,55 +1825,64 @@ def _enriquecer_y_filtrar(
     cardcode: str,
     anio: int,
     db_path: str,
-    resolver_duplicados: str = "mean",  # opciones: "mean", "sum", "error"
+    resolver_duplicados: str = "mean",  # "mean" | "sum" | "error"
     incluir_deltas_cero_si_es_individual: bool = False,  # DEPRECADO: se ignora
     forzar_incluir_todos: bool = False,
 ) -> pd.DataFrame:
     """
-    Añade columna ``Cant_Anterior`` y devuelve SOLO las filas a persistir,
-    siguiendo reglas idempotentes:
-
+    Añade Cant_Anterior y devuelve SOLO filas a persistir siguiendo reglas idempotentes:
       (A) Δ != 0                                -> cambios reales
       (B) Cant == 0  y Cant_Anterior > 0        -> BAJA (>0→0)
       (C) Cant > 0   y Cant_Anterior == 0       -> ALTA (0→>0)
 
     Notas:
-    - `incluir_deltas_cero_si_es_individual` está DEPRECADO y no se usa.
-    - Normaliza Mes a '01'..'12'.
+    - `incluir_deltas_cero_si_es_individual` está DEPRECADO (no se usa).
+    - Normaliza Mes a '01'..'12', Cant a numérico.
     - Si hay duplicados en histórico, se resuelven según `resolver_duplicados`.
-    - Propaga 'CardCode' si viene en df_largo para validar unicidad de salida.
+    - Propaga 'CardCode' si viene en df_largo (para validar unicidad).
     """
+    import time
 
-    # ---------------------------
-    # 0) Normalización de entrada
-    # ---------------------------
-    # Asegurar Mes como texto '01'..'12'
-    if "Mes" in df_largo.columns:
-        df_largo = df_largo.copy()
-        df_largo["Mes"] = df_largo["Mes"].astype(str).str.zfill(2)
+    LOG = "[DEBUG-FILTRO]"
+    t0 = time.perf_counter()
 
-    # Asegurar numérico
-    for col in ("Cant",):
-        if col in df_largo.columns:
-            df_largo[col] = pd.to_numeric(df_largo[col], errors="coerce").fillna(0.0)
+    # 0) Validaciones mínimas + normalización de entrada
+    req_cols = {"ItemCode", "TipoForecast", "OcrCode3", "Mes", "Cant"}
+    missing = req_cols - set(df_largo.columns)
+    if missing:
+        print(f"{LOG} ❌ Faltan columnas requeridas en df_largo: {sorted(missing)}")
+        raise ValueError(f"df_largo carece de columnas requeridas: {sorted(missing)}")
+
+    if df_largo.empty:
+        print(f"{LOG} ⚠️ df_largo vacío → no hay nada que enriquecer/filtrar")
+        return df_largo.copy()
+
+    df_largo = df_largo.copy()
+    # Mes como '01'..'12'
+    df_largo["Mes"] = df_largo["Mes"].astype(str).str.zfill(2)
+    # Cant numérico
+    df_largo["Cant"] = pd.to_numeric(df_largo["Cant"], errors="coerce").fillna(0.0)
+    neg_in = int((df_largo["Cant"] < 0).sum())
+    if neg_in:
+        print(f"{LOG} ⚠️ Se detectaron {neg_in} valores negativos en 'Cant' (entrada)")
 
     print(
-        f"[DEBUG-FILTRO] ▶ Enriqueciendo forecast cliente {cardcode} con histórico ForecastID={forecast_id_prev}"
+        f"{LOG} ▶ Enriqueciendo cliente={cardcode} slpcode={slpcode} anio={anio} "
+        f"forecast_id_prev={forecast_id_prev} resolver_duplicados={resolver_duplicados} "
+        f"forzar_incluir_todos={forzar_incluir_todos}"
+    )
+    print(
+        f"{LOG} df_largo shape={df_largo.shape} uniques ItemCode={df_largo['ItemCode'].nunique()} TipoForecast={df_largo['TipoForecast'].nunique()}"
     )
 
-    # ------------------------------------
     # 1) Recuperar histórico (Cant_Anterior)
-    # ------------------------------------
+    t1 = time.perf_counter()
     if forecast_id_prev is None:
-        print(
-            "[DEBUG-FILTRO] 🆕 Cliente sin historial previo. Se parte desde Cant_Anterior = 0"
-        )
+        print(f"{LOG} info: sin histórico previo → Cant_Anterior = 0")
         df_prev = df_largo[["ItemCode", "TipoForecast", "OcrCode3", "Mes"]].copy()
         df_prev["Cant_Anterior"] = 0.0
     else:
-        print(
-            f"[DEBUG-FILTRO] 🔁 Cliente con historial previo. ForecastID utilizado: {forecast_id_prev}"
-        )
+        print(f"{LOG} usando ForecastID previo: {forecast_id_prev}")
         qry_prev = """
             SELECT ItemCode, TipoForecast, OcrCode3,
                    CAST(strftime('%m', FechEntr) AS TEXT) AS Mes,
@@ -1883,9 +1891,9 @@ def _enriquecer_y_filtrar(
             WHERE  ForecastID = ?
         """
         df_prev = run_query(qry_prev, params=(forecast_id_prev,), db_path=db_path)
-        if df_prev.empty:
+        if df_prev is None or df_prev.empty:
             print(
-                "[DEBUG-FILTRO] ⚠️ Histórico vacío para el ForecastID indicado. Cant_Anterior=0."
+                f"{LOG} ⚠️ Histórico vacío para ForecastID={forecast_id_prev} → Cant_Anterior=0"
             )
             df_prev = df_largo[["ItemCode", "TipoForecast", "OcrCode3", "Mes"]].copy()
             df_prev["Cant_Anterior"] = 0.0
@@ -1894,153 +1902,174 @@ def _enriquecer_y_filtrar(
             df_prev["Cant_Anterior"] = pd.to_numeric(
                 df_prev["Cant_Anterior"], errors="coerce"
             ).fillna(0.0)
-            print(f"[DEBUG-FILTRO] Registros históricos recuperados: {len(df_prev)}")
+            print(f"{LOG} histórico recuperado rows={len(df_prev)}")
 
+            # Resolver duplicados por clave de negocio
             claves = ["ItemCode", "TipoForecast", "OcrCode3", "Mes"]
-            duplicados = df_prev.duplicated(subset=claves, keep=False)
-            if duplicados.any():
+            dup_mask = df_prev.duplicated(subset=claves, keep=False)
+            dup_count = int(dup_mask.sum())
+            if dup_count:
                 print(
-                    f"[⚠️ DEBUG-FILTRO] {duplicados.sum()} duplicados detectados en histórico por clave compuesta."
+                    f"{LOG} ⚠️ Duplicados en histórico por clave {claves}: rows={dup_count}"
                 )
                 if resolver_duplicados == "error":
                     raise ValueError(
-                        "Duplicados en histórico de Forecast_Detalle y resolver_duplicados='error'"
+                        "Duplicados en histórico y resolver_duplicados='error'"
                     )
                 elif resolver_duplicados in {"mean", "sum"}:
                     print(
-                        f"[DEBUG-FILTRO] Resolviendo con agregación '{resolver_duplicados}' sobre Cant_Anterior"
+                        f"{LOG} resolviendo duplicados con agg='{resolver_duplicados}'"
                     )
                     df_prev = df_prev.groupby(claves, as_index=False).agg(
                         {"Cant_Anterior": resolver_duplicados}
                     )
                 else:
                     raise ValueError(
-                        f"Valor no válido en resolver_duplicados: {resolver_duplicados}"
+                        f"resolver_duplicados inválido: {resolver_duplicados}"
                     )
+    t2 = time.perf_counter()
+    print(f"{LOG} histórico.elapsed={t2 - t1:0.3f}s")
 
-    # --------------------------------
-    # 2) Merge y cálculo de diagnóstico
-    # --------------------------------
+    # 2) Merge + diagnóstico
+    t3 = time.perf_counter()
     claves_merge = ["ItemCode", "TipoForecast", "OcrCode3", "Mes"]
     df_enr = df_largo.merge(df_prev, on=claves_merge, how="left")
     df_enr["Cant_Anterior"] = df_enr["Cant_Anterior"].fillna(0.0)
 
-    # Propagar CardCode (si está en df_largo) para validar unicidad en salida
+    # Propagar CardCode si venía
     if "CardCode" in df_largo.columns and "CardCode" not in df_enr.columns:
         df_enr["CardCode"] = df_largo["CardCode"].values
 
-    # Diagnóstico completo
     df_enr["Delta"] = df_enr["Cant"] - df_enr["Cant_Anterior"]
-    print("[DEBUG-FILTRO] ▶ Diagnóstico completo previo al filtro de cambios:")
-    print(
-        df_enr[
-            [
-                "ItemCode",
-                "TipoForecast",
-                "OcrCode3",
-                "Mes",
-                "Cant_Anterior",
-                "Cant",
-                "Delta",
-            ]
+
+    print(f"{LOG} diagnóstico previo al filtro — rows={len(df_enr)}")
+    # Preview acotado para evitar spam
+    try:
+        prev_cols = [
+            "ItemCode",
+            "TipoForecast",
+            "OcrCode3",
+            "Mes",
+            "Cant_Anterior",
+            "Cant",
+            "Delta",
         ]
-        .sort_values(["TipoForecast", "Mes"])
-        .to_string(index=False)
-    )
-
-    # Resumen de Δ=0
-    df_sin_delta = df_enr[df_enr["Delta"] == 0].copy()
-    if not df_sin_delta.empty:
         print(
-            f"[DEBUG-FILTRO] 🟡 Registros sin cambios reales (Δ = 0): {len(df_sin_delta)}"
-        )
-        print(
-            df_sin_delta[["ItemCode", "TipoForecast", "Mes", "Cant"]].to_string(
-                index=False
-            )
-        )
-    else:
-        print("[DEBUG-FILTRO] ✅ Todos los registros tenían algún cambio.")
-
-    # ------------------------------------------------------
-    # 3) REGLAS A/B/C (idempotentes) + métricas de transición
-    # ------------------------------------------------------
-    # Bajas (>0→0), Altas (0→>0), Cambios (>0→>0, Δ≠0)
-    if forzar_incluir_todos:
-        # Para nuevos ForecastIDs: incluir TODOS los registros
-        df_out = df_enr.copy()
-        print("[DEBUG-FILTRO] 🔄 Modo forzado: incluyendo todos los registros")
-    else:
-        # Lógica original solo para cambios
-        bajas_mask = (df_enr["Cant_Anterior"] > 0) & (df_enr["Cant"] == 0)
-        altas_mask = (df_enr["Cant_Anterior"] == 0) & (df_enr["Cant"] > 0)
-        cambios_mask = (
-            (df_enr["Cant_Anterior"] > 0)
-            & (df_enr["Cant"] > 0)
-            & (df_enr["Delta"] != 0)
-        )
-    # Ignorar flag heredado (deprecado)
-    if incluir_deltas_cero_si_es_individual:
-        print(
-            "[INFO] `incluir_deltas_cero_si_es_individual` está DEPRECADO y se ignora. "
-            "Se aplican reglas A/B/C."
-        )
-
-    df_out = df_enr[bajas_mask | altas_mask | cambios_mask].copy()
-
-    print(
-        f"[DEBUG-FILTRO] zero_transitions_applied (bajas >0→0): {int(bajas_mask.sum())}"
-    )
-    print(f"[DEBUG-FILTRO] altas 0→>0: {int(altas_mask.sum())}")
-    print(f"[DEBUG-FILTRO] otros cambios (Δ≠0 con >0→>0): {int(cambios_mask.sum())}")
-
-    print(f"[DEBUG-FILTRO] Registros con cambio real detectado: {len(df_out)}")
-    if not df_out.empty:
-        print("[DEBUG-FILTRO] Preview de cambios:")
-        print(
-            df_out[["ItemCode", "TipoForecast", "Mes", "Cant_Anterior", "Cant"]]
-            .head(10)
+            df_enr[prev_cols]
+            .sort_values(["TipoForecast", "Mes"])
+            .head(24)
             .to_string(index=False)
         )
+        if len(df_enr) > 24:
+            print(f"{LOG} (preview truncado a 24 de {len(df_enr)} filas)")
+    except Exception as _e:
+        print(f"{LOG} (no se pudo imprimir preview) err={_e!r}")
+    t4 = time.perf_counter()
+    print(f"{LOG} merge+diag.elapsed={t4 - t3:0.3f}s")
+
+    # Resumen de Δ=0
+    zeros = df_enr["Delta"].eq(0).sum()
+    if zeros:
+        print(f"{LOG} registros Δ=0: {int(zeros)}")
+
+    # 3) Reglas A/B/C + métricas
+    t5 = time.perf_counter()
+    # Calcular siempre las máscaras para métricas
+    bajas_mask = (df_enr["Cant_Anterior"] > 0) & (df_enr["Cant"] == 0)
+    altas_mask = (df_enr["Cant_Anterior"] == 0) & (df_enr["Cant"] > 0)
+    cambios_mask = (
+        (df_enr["Cant_Anterior"] > 0) & (df_enr["Cant"] > 0) & (df_enr["Delta"] != 0)
+    )
+
+    bajas_cnt, altas_cnt, cambios_cnt = (
+        int(bajas_mask.sum()),
+        int(altas_mask.sum()),
+        int(cambios_mask.sum()),
+    )
+    print(f"{LOG} zero_transitions_applied (>0→0): {bajas_cnt}")
+    print(f"{LOG} altas (0→>0): {altas_cnt}")
+    print(f"{LOG} otros cambios (>0→>0 y Δ≠0): {cambios_cnt}")
+
+    if incluir_deltas_cero_si_es_individual:
+        print(
+            f"{LOG} info: 'incluir_deltas_cero_si_es_individual' está DEPRECADO y se ignora (reglas A/B/C)."
+        )
+
+    if forzar_incluir_todos:
+        df_out = df_enr.copy()
+        print(
+            f"{LOG} modo forzado=ON → se incluyen todos los registros (métricas arriba informativas)"
+        )
+    else:
+        df_out = df_enr[bajas_mask | altas_mask | cambios_mask].copy()
+
+    print(f"{LOG} registros con cambio real a persistir: {len(df_out)}")
+    if not df_out.empty:
+        try:
+            print(
+                df_out[["ItemCode", "TipoForecast", "Mes", "Cant_Anterior", "Cant"]]
+                .head(10)
+                .to_string(index=False)
+            )
+            if len(df_out) > 10:
+                print(f"{LOG} (preview cambios truncado a 10 de {len(df_out)})")
+        except Exception as _e:
+            print(f"{LOG} (no se pudo imprimir preview de cambios) err={_e!r}")
 
         delta_total = float(df_out["Delta"].sum())
-        print(f"[DEBUG-FILTRO] Variación total de unidades: {delta_total:.2f}")
+        print(f"{LOG} variación total (sum Δ): {delta_total:,.2f}")
 
-        resumen_mes = df_out.groupby("Mes")["Delta"].sum().reset_index()
-        print("[DEBUG-FILTRO] Resumen de delta por mes:")
-        print(resumen_mes.to_string(index=False))
+        try:
+            resumen_mes = df_out.groupby("Mes", as_index=False)["Delta"].sum()
+            print(f"{LOG} resumen Δ por mes:\n{resumen_mes.to_string(index=False)}")
+        except Exception as _e:
+            print(f"{LOG} (no se pudo calcular resumen por mes) err={_e!r}")
+    t6 = time.perf_counter()
+    print(f"{LOG} reglas.elapsed={t6 - t5:0.3f}s")
 
-    # --------------------------------------
     # 4) Validación de esquema de delta (B2)
-    # --------------------------------------
+    t7 = time.perf_counter()
     df_val = df_out.rename(
         columns={"Cant_Anterior": "CantidadAnterior", "Cant": "CantidadNueva"}
     )
     validate_delta_schema(df_val, contexto="[VALIDACIÓN ENRIQUECER]")
+    t8 = time.perf_counter()
+    print(f"{LOG} validate_schema.elapsed={t8 - t7:0.3f}s")
 
-    # ------------------------------------------
-    # 5) Validación de unicidad post-enriquecido
-    # ------------------------------------------
+    # 5) Validación de unicidad post-enriquecido (si CardCode disponible)
+    t9 = time.perf_counter()
     claves_bd = ["ItemCode", "TipoForecast", "OcrCode3", "Mes", "CardCode"]
     if "CardCode" in df_out.columns:
-        duplicados_out = df_out.duplicated(subset=claves_bd, keep=False)
-        if duplicados_out.any():
+        dup_out = df_out.duplicated(subset=claves_bd, keep=False)
+        dup_cnt = int(dup_out.sum())
+        if dup_cnt:
             print(
-                f"[❌ FILTRO-ERROR] {int(duplicados_out.sum())} duplicados detectados post-enriquecimiento:"
+                f"{LOG} ❌ duplicados post-enriquecimiento rows={dup_cnt} en claves {claves_bd}"
             )
-            print(
-                df_out[duplicados_out][claves_bd + ["Cant", "Cant_Anterior"]]
-                .sort_values(claves_bd)
-                .to_string(index=False)
-            )
+            try:
+                print(
+                    df_out[dup_out][claves_bd + ["Cant", "Cant_Anterior"]]
+                    .sort_values(claves_bd)
+                    .head(30)
+                    .to_string(index=False)
+                )
+                if dup_cnt > 30:
+                    print(f"{LOG} (preview duplicados truncado a 30 de {dup_cnt})")
+            except Exception as _e:
+                print(f"{LOG} (no se pudo imprimir duplicados) err={_e!r}")
             raise ValueError(
                 "df_out contiene claves duplicadas que violan la restricción única de Forecast_Detalle."
             )
     else:
         print(
-            "[⚠️ FILTRO] No se encontró columna 'CardCode' en df_out — se omitió validación de duplicados."
+            f"{LOG} ⚠️ 'CardCode' no presente en df_out — se omite validación de unicidad por clave completa"
         )
+    t10 = time.perf_counter()
+    print(f"{LOG} uniq-check.elapsed={t10 - t9:0.3f}s")
 
+    print(
+        f"{LOG} end total.elapsed={time.perf_counter() - t0:0.3f}s out.shape={df_out.shape}"
+    )
     return df_out
 
 
@@ -2207,16 +2236,14 @@ def _refrescar_buffer_ui(forecast_id: int, key_buffer: str, db_path: str):
     """
     Reconstruye el buffer de UI SOLO desde BD para el ForecastID activo,
     deduplicando por clave de negocio y sin sumar registros duplicados.
-    Además, garantiza SIEMPRE 4 filas (Cantidad/Precio × Firme/Proyectado)
-    y 12 meses (01..12) por par base (ItemCode+OcrCode3+DocCur).
-
-    Requisitos:
-      - run_query(sql, params=(), db_path=None) -> DataFrame
-      - Motor: SQLite (usa ROWID para ordenar "el último").
+    Garantiza 4 filas (Cantidad/Precio × Firme/Proyectado) y 12 meses (01..12)
+    por par base (ItemCode+OcrCode3+DocCur).
+    Logs: [BUFFER.INFO]/[BUFFER.WARN]/[BUFFER.ERROR] en una sola línea, sin emojis.
     """
-    print(
-        f"[DEBUG-BUFFER] 🔁 Refrescando UI para ForecastID={forecast_id}, buffer={key_buffer}"
-    )
+    import time
+
+    t0 = time.perf_counter()
+    print(f"[BUFFER.INFO] refresh.start forecast_id={forecast_id} key={key_buffer}")
 
     # 1) Traer SOLO el detalle del ForecastID activo (sin Timestamp/ID)
     qry = """
@@ -2233,52 +2260,53 @@ def _refrescar_buffer_ui(forecast_id: int, key_buffer: str, db_path: str):
         FROM Forecast_Detalle
         WHERE ForecastID = ?
     """
-    df_post = run_query(qry, params=(forecast_id,), db_path=db_path)
+    try:
+        df_post = run_query(qry, params=(forecast_id,), db_path=db_path)
+    except Exception as e:
+        print(
+            f"[BUFFER.ERROR] query_failed forecast_id={forecast_id} exc={type(e).__name__} msg={e}"
+        )
+        raise
 
     if df_post is None or df_post.empty:
         print(
-            f"[DEBUG-BUFFER] ⚠️ No se encontraron registros en Forecast_Detalle para ID={forecast_id}"
+            f"[BUFFER.WARN] empty forecast_id={forecast_id} action=session_clear key={key_buffer} elapsed={time.perf_counter()-t0:.3f}s"
         )
         st.session_state[key_buffer] = None
         return
 
-    print(f"[DEBUG-BUFFER] Registros recuperados (raw): {len(df_post)}")
-    print(f"[DEBUG-BUFFER] Columnas recuperadas: {list(df_post.columns)}")
+    print(f"[BUFFER.INFO] fetch rows={len(df_post)} cols={list(df_post.columns)}")
 
     # 2) Normalizar Mes a '01'..'12'
     df_post["Mes"] = df_post["Mes"].astype(str).str.zfill(2)
 
     # 3) Ordenar para que 'last' sea realmente el último registro insertado
-    sort_cols = []
+    sort_cols = ["_rid"]
     if "FechEntr" in df_post.columns:
-        sort_cols.append("FechEntr")
-    sort_cols.append("_rid")  # siempre existe en SQLite
+        sort_cols.insert(0, "FechEntr")
     df_post = df_post.sort_values(sort_cols)
-    print(f"[DEBUG-BUFFER] Orden aplicado por columnas: {sort_cols}")
+    print(f"[BUFFER.INFO] sort.by={sort_cols}")
 
-    # 4) Deduplicar por clave de negocio a nivel de mes (nos quedamos con el último)
+    # 4) Deduplicar por clave de negocio a nivel de mes (quedarse con el último)
     claves_mes = ["ItemCode", "TipoForecast", "OcrCode3", "DocCur", "Mes"]
     before_dedup = len(df_post)
     df_dedup = df_post.drop_duplicates(claves_mes, keep="last").copy()
     after_dedup = len(df_dedup)
     print(
-        f"[DEBUG-BUFFER] Deduplicación por {claves_mes} -> {before_dedup} → {after_dedup} filas"
+        f"[BUFFER.INFO] dedup key={claves_mes} before={before_dedup} after={after_dedup} removed={before_dedup-after_dedup}"
     )
 
     # 5) Mapear 'Linea' representativa
-    #    (a) por clave completa (incluye TipoForecast)
     clave_sin_mes_full = ["ItemCode", "TipoForecast", "OcrCode3", "DocCur"]
+    clave_base = ["ItemCode", "OcrCode3", "DocCur"]
     linea_map_full = df_dedup.groupby(clave_sin_mes_full, as_index=False)[
         "Linea"
     ].last()
-    #    (b) fallback por clave sin TipoForecast (para rellenar si falta)
-    clave_base = ["ItemCode", "OcrCode3", "DocCur"]
     linea_map_base = df_dedup.groupby(clave_base, as_index=False)["Linea"].last()
 
-    # 6) Pivots sin agregar por suma (usar último valor)
+    # 6) Pivots (usar último valor, sin sumas)
     meses = [f"{i:02d}" for i in range(1, 13)]
 
-    # Cantidad
     pivot_cant = (
         df_dedup.pivot_table(
             index=clave_sin_mes_full,
@@ -2292,7 +2320,6 @@ def _refrescar_buffer_ui(forecast_id: int, key_buffer: str, db_path: str):
     )
     pivot_cant["Métrica"] = "Cantidad"
 
-    # Precio
     pivot_prec = (
         df_dedup.pivot_table(
             index=clave_sin_mes_full,
@@ -2306,9 +2333,7 @@ def _refrescar_buffer_ui(forecast_id: int, key_buffer: str, db_path: str):
     )
     pivot_prec["Métrica"] = "Precio"
 
-    print(
-        f"[DEBUG-BUFFER] pivot_cant shape: {pivot_cant.shape} | pivot_prec shape: {pivot_prec.shape}"
-    )
+    print(f"[BUFFER.INFO] pivot.shapes cant={pivot_cant.shape} prec={pivot_prec.shape}")
 
     # 7) Unir métricas y re-incorporar 'Linea'
     df_metrico = pd.concat([pivot_cant, pivot_prec], ignore_index=True)
@@ -2319,8 +2344,9 @@ def _refrescar_buffer_ui(forecast_id: int, key_buffer: str, db_path: str):
     # Fallback Linea por clave base si quedó nulo
     mask_linea_null = df_metrico["Linea"].isna()
     if mask_linea_null.any():
+        missing = int(mask_linea_null.sum())
         print(
-            f"[DEBUG-BUFFER] Línea sin asignar (full): {mask_linea_null.sum()} — aplicando fallback por {clave_base}"
+            f"[BUFFER.INFO] linea.null.after_full count={missing} fallback_key={clave_base}"
         )
         df_metrico = df_metrico.merge(
             linea_map_base, on=clave_base, how="left", suffixes=("", "_fallback")
@@ -2331,13 +2357,12 @@ def _refrescar_buffer_ui(forecast_id: int, key_buffer: str, db_path: str):
             inplace=True,
         )
 
-    # 8) GARANTIZAR SIEMPRE 4 filas (Firme/Proyectado × Cantidad/Precio) por base (ItemCode+OcrCode3+DocCur)
+    # 8) Garantizar 4 filas por base (Firme/Proyectado × Cantidad/Precio)
     base = df_metrico[clave_base].drop_duplicates()
     tipos = pd.DataFrame({"TipoForecast": ["Firme", "Proyectado"]})
     metricas = pd.DataFrame({"Métrica": ["Cantidad", "Precio"]})
     grid = base.merge(tipos, how="cross").merge(metricas, how="cross")
 
-    # Merge del grid con lo ya pivotado
     df_metrico = grid.merge(
         df_metrico,
         how="left",
@@ -2345,7 +2370,7 @@ def _refrescar_buffer_ui(forecast_id: int, key_buffer: str, db_path: str):
         suffixes=("", "_y"),
     )
 
-    # Rellenos de meses y Linea
+    # Rellenos de meses
     for m in meses:
         if m not in df_metrico.columns:
             df_metrico[m] = 0.0
@@ -2353,9 +2378,8 @@ def _refrescar_buffer_ui(forecast_id: int, key_buffer: str, db_path: str):
 
     # Si aún faltase Linea, completar con el último disponible por base
     if df_metrico["Linea"].isna().any():
-        print(
-            f"[DEBUG-BUFFER] Línea aún nula tras merge: {df_metrico['Linea'].isna().sum()} — completando por base"
-        )
+        left = int(df_metrico["Linea"].isna().sum())
+        print(f"[BUFFER.INFO] linea.null.after_merge count={left} fill=base_map")
         df_metrico = df_metrico.merge(
             linea_map_base, on=clave_base, how="left", suffixes=("", "_b")
         )
@@ -2364,7 +2388,7 @@ def _refrescar_buffer_ui(forecast_id: int, key_buffer: str, db_path: str):
             columns=[c for c in df_metrico.columns if c.endswith("_b")], inplace=True
         )
 
-    # 9) Reordenar columnas finales (fijas + 12 meses)
+    # 9) Reordenar columnas finales
     cols_fijas = ["ItemCode", "TipoForecast", "OcrCode3", "Linea", "DocCur", "Métrica"]
     df_metrico = (
         df_metrico[cols_fijas + meses]
@@ -2372,24 +2396,22 @@ def _refrescar_buffer_ui(forecast_id: int, key_buffer: str, db_path: str):
         .reset_index(drop=True)
     )
 
-    print(
-        f"[DEBUG-BUFFER] Grid base: {len(base)} | Filas finales (deben ser base×4): {len(df_metrico)}"
-    )
-    print(f"[DEBUG-BUFFER] Columnas finales: {df_metrico.columns.tolist()}")
-    print(f"[DEBUG-BUFFER] Buffer final generado. Filas: {len(df_metrico)}")
-    print("[DEBUG-BUFFER] Preview (primeras 2 filas):")
-    try:
-        print(df_metrico.head(2).to_string(index=False))
-    except Exception as e:
-        print(f"[DEBUG-BUFFER] (no se pudo imprimir preview) {e}")
+    expected = len(base) * 4
+    final_rows = len(df_metrico)
+    if final_rows != expected:
+        print(
+            f"[BUFFER.WARN] row_mismatch base={len(base)} expected={expected} final={final_rows}"
+        )
 
-    # 10) Persistir en sesión con el mismo índice que ya usas
+    print(
+        f"[BUFFER.INFO] grid.base={len(base)} rows.final={final_rows} cols.final={len(df_metrico.columns)}"
+    )
+    print(f"[BUFFER.INFO] cols.final={df_metrico.columns.tolist()}")
+
+    # 10) Persistir en sesión con el índice usado por la UI
     st.session_state[key_buffer] = df_metrico.set_index(
         ["ItemCode", "TipoForecast", "Métrica"]
     )
-
-    print(f"[DEBUG-BUFFER-REFRESH] Inicio refresh UI - key_buffer: {key_buffer}")
     print(
-        f"[DEBUG-BUFFER-REFRESH] Estado buffer antes (len): {len(st.session_state.get(key_buffer, [])) if st.session_state.get(key_buffer, None) is not None else 'None'}"
+        f"[BUFFER.INFO] session.set key={key_buffer} rows={final_rows} index=('ItemCode','TipoForecast','Métrica') elapsed={time.perf_counter()-t0:.3f}s"
     )
-    print("[DEBUG-BUFFER-REFRESH] Completado refresh UI")
