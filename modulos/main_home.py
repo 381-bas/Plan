@@ -2,9 +2,9 @@
 # # ∂B_CTX001/∂B0
 import streamlit as st
 from streamlit.runtime.scriptrunner import RerunException, RerunData
-from utils.db import (
-    _run_home_select,
-)
+from core.consultas_forecast import vendedores_con_forecast
+from config.contexto import obtener_anio
+from utils.db import DB_PATH
 
 
 # B_RUN001: Ejecutor principal – Visualización y navegación de módulos de Quimick
@@ -52,22 +52,23 @@ def run():
     st.subheader("🗓️ Forecast cargado por cliente")
 
     try:
-        query = """
-            SELECT DISTINCT f.SlpCode, o.SlpName
-            FROM Forecast f
-            JOIN OSLP o ON f.SlpCode = o.SlpCode
-            ORDER BY f.SlpCode
-        """
-        df_vendedores = _run_home_select(query)
+        # --- INICIO DE LA MODIFICACIÓN ---
+        # Usamos la nueva función centralizada y segura
+        anio_actual = obtener_anio()
+        df_vendedores = vendedores_con_forecast(DB_PATH, anio_actual)
+        # --- FIN DE LA MODIFICACIÓN ---
 
-        for _, row in df_vendedores.iterrows():
-            col1, col2 = st.columns([1, 5])
-            with col1:
-                if st.button("✍️ Ir", key=f"btn_{row['SlpCode']}"):
-                    st.query_params.update(modulo="ventas", vendedor=row["SlpCode"])
-                    st.rerun()
-            with col2:
-                st.markdown(f"**{row['SlpCode']} – {row['SlpName']}**")
+        if df_vendedores.empty:
+            st.info("No hay vendedores con forecast para el año actual.")
+        else:
+            for _, row in df_vendedores.iterrows():
+                col1, col2 = st.columns([1, 5])
+                with col1:
+                    if st.button("✍️ Ir", key=f"btn_{row['SlpCode']}"):
+                        st.query_params.update(modulo="ventas", vendedor=row["SlpCode"])
+                        st.rerun()
+                with col2:
+                    st.markdown(f"**{row['SlpCode']} – {row['SlpName']}**")
 
     except Exception as e:
         try:
