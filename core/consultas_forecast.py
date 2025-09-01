@@ -4,7 +4,6 @@ from __future__ import annotations
 import pandas as pd
 from pathlib import Path
 from typing import Optional, Union
-import sqlite3
 import numpy as np
 from utils.db import run_query
 from utils.db import DB_PATH, _run_cf_select
@@ -112,9 +111,7 @@ def obtener_forecast_historico(
     }
 
     # ── Ejecución
-    db_path = str(db_path)
-    with sqlite3.connect(db_path) as con:
-        df = pd.read_sql_query(sql, con, params=params)
+    df = run_query(sql, db_path, tuple(params))
 
     print(f"[CFH-001] raw result shape: {df.shape}")
 
@@ -311,8 +308,7 @@ def vendedores_con_forecast(db_path: str, anio: int) -> pd.DataFrame:
         WHERE strftime('%Y', f.Fecha_Carga) = ?
     """
     try:
-        with sqlite3.connect(db_path) as con:
-            df = pd.read_sql(q1, con, params=[y])
+        df = run_query(q1, params=(y,), db_path=db_path)
         print(f"[VEND-LIST.DEBUG] q1_rows={len(df)} cols={df.columns.tolist()}")
     except Exception as e:
         print(f"[VEND-LIST.WARN] q1 falló: {e}")
@@ -333,8 +329,7 @@ def vendedores_con_forecast(db_path: str, anio: int) -> pd.DataFrame:
             )
         """
         try:
-            with sqlite3.connect(db_path) as con:
-                df = pd.read_sql(q2, con, params=[y])
+            df = run_query(q2, params=(y,), db_path=db_path)
             print(f"[VEND-LIST.FALLBK] q2_rows={len(df)}")
         except Exception as e:
             print(f"[VEND-LIST.ERROR] Fallback q2 falló: {e}")

@@ -2,14 +2,14 @@
 # # ∂B_FCS001/∂B0
 from __future__ import annotations
 import pandas as pd
-import re
 import time
 import numpy as np
 import streamlit as st
 from pathlib import Path
 from typing import Tuple, Optional, Any, Dict, Literal, Set
 from datetime import datetime
-import sqlite3
+from contextlib import nullcontext
+
 
 from hashlib import sha256
 from pandas.util import hash_pandas_object  # hash estructural
@@ -24,7 +24,14 @@ from utils.db import (
     _run_log_to_sql,
     DB_PATH,
     run_query,
+    _read_sql,
 )
+
+from utils.db import tx, deduplicar_detalle_por_clave
+
+with tx(DB_PATH, immediate=True) as conn:
+    deduplicar_detalle_por_clave(conn)
+
 
 from utils.repositorio_forecast.repositorio_forecast_editor import get_key_buffer
 
@@ -136,47 +143,6 @@ def preparar_payload_guardado(
 
 
 # Función 1
-# -------------------------------------------------
-# 5) persistir_cambios_cliente (P1)
-#    => añade validación dura + índice único + checklist
-#    Usa funciones P0: preparar_payload_guardado, insertar_forecast_detalle,
-#    _refrescar_buffer_ui, obtener_forecast_activo
-# -------------------------------------------------
-# core/editor_forecast o donde la tengas definida
-
-
-def _open_conn(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(
-        db_path, timeout=30, isolation_level=None
-    )  # autocommit controlado por BEGIN
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout=8000;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
-    print("[SQL.OPEN] WAL+busy_timeout listos")
-    return conn
-
-
-def _begin_immediate_with_retry(
-    conn: sqlite3.Connection, max_retries: int = 6, base_sleep: float = 0.25
-):
-    for i in range(max_retries):
-        try:
-            conn.execute("BEGIN IMMEDIATE;")
-            print("[SQL.BEGIN] BEGIN IMMEDIATE")
-            return
-        except sqlite3.OperationalError as e:
-            if "locked" in str(e).lower():
-                print(f"[LOCK.RETRY {i+1}] {e}")
-                time.sleep(base_sleep * (i + 1))
-                continue
-            raise
-    raise sqlite3.OperationalError(
-        "database is locked (BEGIN IMMEDIATE retries agotados)"
-    )
-
-
-# --- PATCH 3: persistir_cambios_cliente (principal) ---
 def persistir_cambios_cliente(
     slpcode: int,
     cardcode: str,
@@ -185,32 +151,27 @@ def persistir_cambios_cliente(
     db_path: str,
     key_buffer: str | None = None,
 ) -> dict:
-    import sqlite3
 
     MES_COLS = [f"{m:02d}" for m in range(1, 13)]
     BASE_IDX = ["ItemCode", "TipoForecast", "Métrica", "OcrCode3"]
 
     try:
-        conn = sqlite3.connect(db_path, timeout=30)
-        cur = conn.cursor()
-        # WAL + timeout
+        # 1) índice único y dedup FUERA de la transacción principal (conexión centralizada)
         try:
-            cur.execute("PRAGMA journal_mode=WAL;")
-            cur.execute("PRAGMA busy_timeout=8000;")
-            print("[SQL.OPEN] WAL+busy_timeout listos")
+            with tx(db_path, immediate=False) as conn:
+                try:
+                    asegurar_indice_unico_forecast_detalle(conn=conn)
+                except Exception as e:
+                    print(
+                        f"[IDX.WARN] asegurar_indice falló: {e}. Intentando dedup & retry..."
+                    )
+                    try:
+                        deduplicar_detalle_por_clave(conn)
+                        asegurar_indice_unico_forecast_detalle(conn=conn)
+                    except Exception as e2:
+                        print(f"[IDX.ERROR] retry falló: {e2}")
         except Exception as e:
-            print(f"[SQL.OPEN.WARN] {e}")
-
-        # 1) índice único y dedup FUERA de la transacción principal
-        try:
-            asegurar_indice_unico_forecast_detalle(conn=conn)
-        except Exception as e:
-            print(f"[IDX.WARN] asegurar_indice falló: {e}. Intentando dedup & retry...")
-            try:
-                deduplicar_detalle_por_clave(conn)
-                asegurar_indice_unico_forecast_detalle(conn=conn)
-            except Exception as e2:
-                print(f"[IDX.ERROR] retry falló: {e2}")
+            print(f"[SQL.OPEN.WARN] índice/dedup pre-TX: {e}")
 
         # 2) Preparar payload desde la UI 4×12  → formato largo Cant/PrecioUN por mes
         #    (Métrica solo existe en UI)
@@ -218,7 +179,7 @@ def persistir_cambios_cliente(
         validar_forecast_dataframe(df_ui_editado)
         print("[VAL.UI.RESULT] ok=True errores=0 warnings=0")
 
-        # melt
+        # melt (se mantiene la lógica existente para no cambiar estructura funcional)
         tmp = df_ui_editado.copy()
         tmp["ItemCode"] = tmp["ItemCode"].astype(str)
         tmp["TipoForecast"] = tmp["TipoForecast"].astype(str)
@@ -284,51 +245,50 @@ def persistir_cambios_cliente(
 
         # 3) TRANSACCIÓN principal: crear header nuevo + insertar detalle (sin borrar históricos)
         print("[SQL.BEGIN] BEGIN IMMEDIATE")
-        conn.execute("BEGIN IMMEDIATE;")
-
-        forecast_id = obtener_forecast_activo(
-            conn, slpcode, cardcode, anio, force_new=True
-        )
-
-        # inserción por lotes
-        insert_sql = """
-        INSERT INTO Forecast_Detalle
-          (ForecastID, SlpCode, ItemCode, CardCode, Linea, OcrCode3, FechEntr, Cant, PrecioUN, DocCur, TipoForecast)
-        VALUES
-          (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-        """
-        # Fallback de Linea (si tu modelo usa OcrCode3 como Linea)
-        if "Linea" not in payload.columns:
-            payload["Linea"] = payload["OcrCode3"]
-
-        rows = []
-        for _, r in payload.iterrows():
-            rows.append(
-                (
-                    forecast_id,
-                    int(slpcode),
-                    str(r["ItemCode"]),
-                    cardcode,
-                    str(r["Linea"]),
-                    str(r["OcrCode3"]),
-                    str(r["FechEntr"]),
-                    float(r["Cant"]),
-                    float(r["PrecioUN"]),
-                    str(r["DocCur"]),
-                    str(r["TipoForecast"]),
-                )
+        with tx(db_path, immediate=True) as conn:
+            forecast_id = obtener_forecast_activo(
+                conn, slpcode, cardcode, anio, force_new=True
             )
 
-        cur.executemany(insert_sql, rows)
-        conn.commit()
-        print(
-            f"[SAVE.OK] cliente={cardcode} forecast_id={forecast_id} rows={len(rows)}"
-        )
+            # inserción por lotes
+            insert_sql = """
+            INSERT INTO Forecast_Detalle
+              (ForecastID, SlpCode, ItemCode, CardCode, Linea, OcrCode3, FechEntr, Cant, PrecioUN, DocCur, TipoForecast)
+            VALUES
+              (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """
+            # Fallback de Linea (si tu modelo usa OcrCode3 como Linea)
+            if "Linea" not in payload.columns:
+                payload["Linea"] = payload["OcrCode3"]
+
+            rows = []
+            for _, r in payload.iterrows():
+                rows.append(
+                    (
+                        forecast_id,
+                        int(slpcode),
+                        str(r["ItemCode"]),
+                        cardcode,
+                        str(r["Linea"]),
+                        str(r["OcrCode3"]),
+                        str(r["FechEntr"]),
+                        float(r["Cant"]),
+                        float(r["PrecioUN"]),
+                        str(r["DocCur"]),
+                        str(r["TipoForecast"]),
+                    )
+                )
+
+            cur = conn.cursor()
+            cur.executemany(insert_sql, rows)
+            print(
+                f"[SAVE.OK] cliente={cardcode} forecast_id={forecast_id} rows={len(rows)}"
+            )
 
         return {"ok": True, "forecast_id": forecast_id, "rows": len(rows)}
 
     except Exception:
-        # Dentro del bloque donde limpias caché (try/except/finally)
+        # Dentro del bloque donde limpias caché (try/except/finalmente)
         try:
             # import diferido para evitar el ciclo al cargar el módulo
             from modulos.ventas import (
@@ -359,15 +319,15 @@ def insertar_forecast_detalle(
     db_path: str,
     replace: bool = True,
 ) -> int:
+
     print("[PFD-007] formato detectado -> largo=True")
     if df_in is None or df_in.empty:
         # Detalle vacío es válido (todo quedó en 0)
         if replace:
-            with sqlite3.connect(db_path) as con:
+            with tx(db_path, immediate=True) as con:
                 con.execute(
                     "DELETE FROM Forecast_Detalle WHERE ForecastID = ?", (forecast_id,)
                 )
-                con.commit()
         print("[PFD-007] detalle vacío (Cant>0 = 0) | filas_insertadas=0")
         return 0
 
@@ -377,19 +337,17 @@ def insertar_forecast_detalle(
     df = df[df["Cant"] > 0].copy()  # SOLO >0
     if df.empty:
         if replace:
-            with sqlite3.connect(db_path) as con:
+            with tx(db_path, immediate=True) as con:
                 con.execute(
                     "DELETE FROM Forecast_Detalle WHERE ForecastID = ?", (forecast_id,)
                 )
-                con.commit()
         print("[PFD-007] SOLO ceros tras filtro | filas_insertadas=0")
         return 0
 
     df["Mes"] = df["Mes"].astype(str).str.zfill(2)
     if "FechEntr" not in df.columns or df["FechEntr"].isna().any():
-        df["FechEntr"] = pd.to_datetime(
-            df["Mes"].map(lambda m: f"{anio}-{m}-01"), errors="coerce"
-        )
+        # Normaliza siempre a string yyyy-mm-01 (evita objetos datetime en inserción)
+        df["FechEntr"] = df["Mes"].map(lambda m: f"{anio}-{m}-01")
     df["Linea"] = df.get("Linea", "Trader")
     if isinstance(df["Linea"], pd.Series):
         df["Linea"] = df["Linea"].fillna("Trader")
@@ -426,7 +384,7 @@ def insertar_forecast_detalle(
     rows = [tuple(x) for x in df[cols].itertuples(index=False, name=None)]
 
     # Delete-replace por ForecastID
-    with sqlite3.connect(db_path) as con:
+    with tx(db_path, immediate=True) as con:
         cur = con.cursor()
         if replace:
             cur.execute(
@@ -441,7 +399,6 @@ def insertar_forecast_detalle(
         """,
             rows,
         )
-        con.commit()
 
     print(f"[PFD-007] ✅ insert completado | filas_insertadas={len(rows)}")
     return len(rows)
@@ -596,6 +553,7 @@ def _refrescar_buffer_ui(
 def forecast_prev(
     slpcode: int, cardcode: str, anio: int, *, db_path: str
 ) -> pd.DataFrame:
+
     q = """
     SELECT d.ItemCode, d.TipoForecast, d.OcrCode3,
            strftime('%m', d.FechEntr) AS Mes,
@@ -608,8 +566,7 @@ def forecast_prev(
       AND date(d.FechEntr) <  date((? + 1) || '-01-01')
     ORDER BY d.FechEntr
     """
-    with sqlite3.connect(db_path) as conn:
-        df = pd.read_sql_query(q, conn, params=[slpcode, cardcode, anio, anio])
+    df = run_query(q, params=(slpcode, cardcode, anio, anio), db_path=db_path)
     if df.empty:
         print("[FORECAST.PREV] sin filas")
         return df
@@ -801,18 +758,6 @@ TIPOS = ("Firme", "Proyectado")
 METRICAS = ("Cantidad", "Precio")
 
 # --- Helpers DB seguros --------------------------------------------------------
-
-
-def _read_sql(db_path: str, sql: str, params: tuple = ()) -> pd.DataFrame:
-    with sqlite3.connect(db_path) as con:
-        return pd.read_sql_query(sql, con, params=params)
-
-
-def _exec_many(db_path: str, sql: str, rows: list[tuple]) -> None:
-    with sqlite3.connect(db_path) as con:
-        cur = con.cursor()
-        cur.executemany(sql, rows)
-        con.commit()
 
 
 def _leer_detalle_forecast(forecast_id: int, db_path: str) -> pd.DataFrame:
@@ -1239,164 +1184,63 @@ def make_4x12_from(
 
 
 # Función 13
-def _col_exists(conn: sqlite3.Connection, table: str, col: str) -> bool:
-    rows = conn.execute(f"PRAGMA table_info({table});").fetchall()
-    cols = {r[1] for r in rows}
-    return col in cols
-
-
-def _metric_col_name(conn: sqlite3.Connection) -> str:
-    # intenta Metrica, luego Métrica, luego Metric
-    for c in ("Metrica", "Métrica", "Metric"):
-        if _col_exists(conn, "Forecast_Detalle", c):
-            return c
-    raise RuntimeError("No se encontró columna de Métrica en Forecast_Detalle")
-
-
 def asegurar_indice_unico_forecast_detalle(
-    db_path: Optional[str] = None, conn: Optional[sqlite3.Connection] = None
+    db_path: Optional[str] = None, conn: Optional[Any] = None
 ):
     """
     Crea (si no existe) el índice ÚNICO correcto para Forecast_Detalle SIN usar 'Métrica'.
     Clave única: (ForecastID, CardCode, ItemCode, TipoForecast, OcrCode3, FechEntr)
     """
-    close_after = False
-    if conn is None:
+    # Usar la tx() central si no se provee una conexión abierta
+    if conn is not None:
+        cm = nullcontext(conn)
+    else:
         if not db_path:
             raise ValueError("db_path requerido si no se entrega 'conn'")
-        conn = sqlite3.connect(db_path, timeout=30)
-        close_after = True
+        cm = tx(db_path, immediate=True)  # BEGIN IMMEDIATE dentro de tx()
 
+    idx_name_ok = "ux_ForecastDet_FID_Card_Item_Tipo_Linea_Mes"
     try:
-        cur = conn.cursor()
+        with cm as c:
+            cur = c.cursor()
 
-        # Modo WAL y timeout razonable
-        try:
-            cur.execute("PRAGMA journal_mode=WAL;")
-            cur.execute("PRAGMA busy_timeout=8000;")
-            print("[SQL.OPEN] WAL+busy_timeout listos")
-        except Exception as e:
-            print(f"[SQL.OPEN.WARN] {e}")
+            # Validar columnas requeridas (Métrica NO aplica a BD)
+            cols = [
+                r[1]
+                for r in cur.execute("PRAGMA table_info('Forecast_Detalle')").fetchall()
+            ]
+            required = [
+                "ForecastID",
+                "CardCode",
+                "ItemCode",
+                "TipoForecast",
+                "OcrCode3",
+                "FechEntr",
+            ]
+            missing = [col for col in required if col not in cols]
+            if missing:
+                raise RuntimeError(
+                    f"Faltan columnas requeridas en Forecast_Detalle: {missing}"
+                )
 
-        # Validar columnas requeridas (Métrica NO aplica a BD)
-        cols = [
-            r[1]
-            for r in cur.execute("PRAGMA table_info('Forecast_Detalle')").fetchall()
-        ]
-        required = [
-            "ForecastID",
-            "CardCode",
-            "ItemCode",
-            "TipoForecast",
-            "OcrCode3",
-            "FechEntr",
-        ]
-        missing = [c for c in required if c not in cols]
-        if missing:
-            raise RuntimeError(
-                f"Faltan columnas requeridas en Forecast_Detalle: {missing}"
-            )
+            # Crear índice único correcto (idempotente)
+            idxs = cur.execute("PRAGMA index_list('Forecast_Detalle');").fetchall()
+            names = {r[1] for r in idxs}
+            print(f"[IDX.CHECK] existentes={names}")
+            if idx_name_ok in names:
+                print(f"[IDX.SKIP] {idx_name_ok} ya existe")
+                return
 
-        # Crear índice único correcto
-        idxs = cur.execute("PRAGMA index_list(Forecast_Detalle);").fetchall()
-        names = {r[1] for r in idxs}
-        idx_name_ok = "ux_ForecastDet_FID_Card_Item_Tipo_Linea_Mes"
-
-        print(f"[IDX.CHECK] existentes={names}")
-        if idx_name_ok in names:
-            print(f"[IDX.SKIP] {idx_name_ok} ya existe")
-            return
-
-        sql = f"""
-        CREATE UNIQUE INDEX IF NOT EXISTS {idx_name_ok}
-        ON Forecast_Detalle(ForecastID, CardCode, ItemCode, TipoForecast, OcrCode3, FechEntr);
-        """
-        print(f"[IDX.CREATE.SQL] {sql.strip()}")
-        cur.execute("BEGIN IMMEDIATE")
-        print("[SQL.BEGIN] BEGIN IMMEDIATE")
-        cur.execute(sql)
-        conn.commit()
-        print(f"[IDX.OK] creado {idx_name_ok}")
+            sql = f"""
+            CREATE UNIQUE INDEX IF NOT EXISTS {idx_name_ok}
+            ON Forecast_Detalle(ForecastID, CardCode, ItemCode, TipoForecast, OcrCode3, FechEntr);
+            """
+            print(f"[IDX.CREATE.SQL] {sql.strip()}")
+            cur.execute(sql)
+            print(f"[IDX.OK] creado {idx_name_ok}")
     except Exception as e:
-        try:
-            conn.rollback()
-            print("[SQL.ROLLBACK]")
-        except Exception:
-            pass
         print(f"[IDX.ERROR] asegurar_indice: {e}")
         raise
-    finally:
-        if close_after:
-            conn.close()
-
-
-# Función 14
-def deduplicar_detalle_por_clave(conn: sqlite3.Connection) -> int:
-    """
-    Limpia duplicados en Forecast_Detalle usando la clave REAL de BD:
-    (ForecastID, CardCode, ItemCode, TipoForecast, OcrCode3, FechEntr)
-    Conserva la mejor fila por clave (preferimos la que tenga más datos no nulos).
-    Retorna el número de filas eliminadas.
-    """
-    cur = conn.cursor()
-
-    # 1) Detectar claves duplicadas
-    sql_dups = """
-    SELECT ForecastID, CardCode, ItemCode, TipoForecast, OcrCode3, FechEntr, COUNT(*) as c
-    FROM Forecast_Detalle
-    GROUP BY ForecastID, CardCode, ItemCode, TipoForecast, OcrCode3, FechEntr
-    HAVING c > 1;
-    """
-    dups = cur.execute(sql_dups).fetchall()
-    if not dups:
-        print("[DUP.INFO] sin duplicados por clave")
-        return 0
-
-    print(f"[DUP.INFO] claves duplicadas={len(dups)}")
-
-    # 2) Por cada clave, elegir un ROWID 'ganador' (más completo) y borrar el resto
-    total_del = 0
-    keep_q = """
-    SELECT rowid
-    FROM Forecast_Detalle
-    WHERE ForecastID=? AND CardCode=? AND ItemCode=? AND TipoForecast=? AND OcrCode3=? AND FechEntr=?
-    ORDER BY (Cant IS NULL) ASC, (PrecioUN IS NULL) ASC, rowid DESC
-    LIMIT 1;
-    """
-    del_q = """
-    DELETE FROM Forecast_Detalle
-    WHERE ForecastID=? AND CardCode=? AND ItemCode=? AND TipoForecast=? AND OcrCode3=? AND FechEntr=?
-      AND rowid <> ?;
-    """
-
-    cur.execute("BEGIN IMMEDIATE;")
-    print("[SQL.BEGIN] BEGIN IMMEDIATE (dedup)")
-
-    try:
-        for fid, card, item, tipo, linea, fch, _c in dups:
-            keep_rowid = cur.execute(
-                keep_q, (fid, card, item, tipo, linea, fch)
-            ).fetchone()
-            if not keep_rowid:
-                continue
-            keep_rowid = keep_rowid[0]
-            cur.execute(del_q, (fid, card, item, tipo, linea, fch, keep_rowid))
-            total_del += cur.rowcount
-
-        conn.commit()
-        print(f"[DUP.OK] eliminadas={total_del}")
-    except Exception as e:
-        conn.rollback()
-        print(f"[DUP.ERROR] {e}")
-        raise
-
-    return total_del
-
-
-# Función 15
-
-
-# Función 16
 
 
 # B_FCS005: Obtener forecast editable para edición directa por cliente
@@ -1681,7 +1525,6 @@ def inicializar_buffer_cliente(
     - Columnas de meses aseguradas y en orden 01..12 (numéricas).
     - No toca *_edithash (la UI lo gestiona).
     """
-    import numpy as np
 
     print("[RFE-004] ▶ start inicializar_buffer_cliente")
     print(
@@ -2485,27 +2328,6 @@ def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
         print("✅ [VALIDATION-END] Validación exitosa - Sin errores encontrados")
 
     return errores
-
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ────────────────────────────────────────────────────────────────────────────────
-def _ocr3_a_linea(ocr: str) -> str:
-    """
-    Mapea el valor de OcrCode3 al concepto de 'Linea'.
-
-    Reglas actuales:
-        - 'Pta-' ⭢ 'Planta'
-        - 'Trd-' ⭢ 'Trader'
-        - Cualquier otro prefijo o valor nulo ⭢ 'Desconocido'
-    """
-    if not ocr:  # None, NaN o string vacío
-        return "Desconocido"
-    if re.match(r"(?i)^pta[-_]", ocr):
-        return "Planta"
-    if re.match(r"(?i)^trd[-_]", ocr):
-        return "Trader"
-    return "Desconocido"
 
 
 # B_FEN004: Inserción de cabecera Forecast (SlpCode + Fecha_Carga)

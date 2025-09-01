@@ -1,13 +1,16 @@
 ﻿# B_VIN002: Importaciones fundacionales y dependencias funcionales para ventas
 # # ∂B_VIN002/∂B0
 import hashlib
-import sqlite3
 from pathlib import Path
 from typing import Optional
-
 import numpy as np
-import pandas as pd
 import streamlit as st
+import pandas as pd
+from utils.db import (
+    run_query,
+    DB_PATH,
+)  # + lo que ya uses de utils.db (tx, etc.)
+
 
 from config.contexto import obtener_anio  # ∂
 from core.consultas_forecast import (
@@ -26,7 +29,6 @@ from modulos.ventas_facturas_snippet import mostrar_facturas
 from utils.alertas import (
     render_alertas_forecast,
 )
-from utils.db import DB_PATH
 
 
 # --- util: reconstruir DF guardable desde el buffer de sesión ---
@@ -136,30 +138,29 @@ def _db_fingerprint(
     p = Path(db_path)
     try:
         s = p.stat()
-        with sqlite3.connect(db_path) as con:
-            cur = con.cursor()
-            # Conteos y máximos “baratos” que se mueven al guardar
-            nF, maxF = cur.execute(
-                """
-                SELECT COUNT(*), COALESCE(MAX(ForecastID), 0)
-                FROM Forecast
-            """
-            ).fetchone()
 
-            nD, maxRowid = cur.execute(
-                """
-                SELECT COUNT(*), COALESCE(MAX(rowid), 0)
-                FROM Forecast_Detalle
-            """
-            ).fetchone()
+        # Consulta única (centralizada) para obtener todos los agregados requeridos
+        q = """
+        SELECT
+          (SELECT COUNT(*) FROM Forecast)                            AS nF,
+          (SELECT COALESCE(MAX(ForecastID), 0) FROM Forecast)        AS maxF,
+          (SELECT COUNT(*) FROM Forecast_Detalle)                    AS nD,
+          (SELECT COALESCE(MAX(rowid), 0) FROM Forecast_Detalle)     AS maxRowid
+        """
+        df = run_query(q, db_path)
+
+        nF = int(df.loc[0, "nF"]) if not df.empty else 0
+        maxF = int(df.loc[0, "maxF"]) if not df.empty else 0
+        nD = int(df.loc[0, "nD"]) if not df.empty else 0
+        maxRowid = int(df.loc[0, "maxRowid"]) if not df.empty else 0
 
         return (
             int(s.st_mtime_ns),  # 1
             int(s.st_size),  # 2
-            int(nF),  # 3
-            int(maxF),  # 4
-            int(nD),  # 5
-            int(maxRowid),  # 6
+            nF,  # 3
+            maxF,  # 4
+            nD,  # 5
+            maxRowid,  # 6
         )
     except Exception as e:
         print(f"[FP][warn] fingerprint fallback: {e}")
@@ -404,8 +405,6 @@ def _forecast_id_visible(
         except Exception:
             pass
 
-    ini = f"{anio:04d}-01-01"
-    fin = f"{anio+1:04d}-01-01"
     q = """
         SELECT MAX(fd.ForecastID)
         FROM Forecast_Detalle fd
@@ -416,9 +415,10 @@ def _forecast_id_visible(
           AND fd.FechEntr >= ?
           AND fd.FechEntr <  ?
     """
-    with sqlite3.connect(db_path) as con:
-        row = con.execute(q, (int(slpcode), cardcode, ini, fin)).fetchone()
-    return int(row[0]) if row and row[0] is not None else None
+    df = run_query(q, db_path, (slpcode, cardcode, anio, anio))
+    if df.empty or pd.isna(df.loc[0, "MaxID"]):
+        return None
+    return int(df.loc[0, "MaxID"])
 
 
 # B_VFO001: Editor visual controlado y selección de cliente para forecast editable
