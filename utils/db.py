@@ -13,8 +13,10 @@ import time
 from functools import wraps
 from typing import Any, Callable, List, Tuple, Iterator
 import os
+from typing import Optional
 
 OperationalError = sqlite3.OperationalError
+DatabaseError = sqlite3.DatabaseError
 
 # ---------------------------------------------------------------------------
 # 📌 Configuración global
@@ -26,41 +28,41 @@ DB_PATH: str = (
 DB_PATH = os.getenv("DB_PATH", DB_PATH)  # usa el ya definido en tu módulo
 BUSY_MS = 30_000
 
+
 # ---------------------------------------------------------------------------
 # 🔑 Núcleo limpio (lectura / escritura)
 # ---------------------------------------------------------------------------
-
-
 def run_query(sql: str, *args: Any, **kwargs: Any) -> pd.DataFrame:  # noqa: C901
-    """Ejecuta un SELECT y devuelve un **pandas.DataFrame**.
-
-    Acepta **dos** patrones de llamada para compatibilidad retro‑activa:
-
-    1. **Legado**  (3 posicionales)
-       >>> run_query(sql, DB_PATH, params)
-
-    2. **Nuevo**   (params como *kw‑only*)
-       >>> run_query(sql, params=params, db_path=DB_PATH)
-
-    El parámetro *db_path* es opcional y por defecto usa :data:`DB_PATH`.
     """
-    # ------------------ Parseo flexible de argumentos ------------------
+    Ejecuta un SELECT y devuelve un DataFrame.
+
+    Firmas soportadas (compatibilidad retro):
+      1) legacy:   run_query(sql, DB_PATH, params)
+      2) moderna:  run_query(sql, params=..., db_path=DB_PATH)
+      3) atajo:    run_query(sql, DB_PATH)  -> params=()
+
+    Notas:
+      - Acepta db_path como str u os.PathLike.
+      - Rechaza 'params' tipo lista de tuplas/listas (patrón de executemany).
+    """
     db_path: str = kwargs.pop("db_path", DB_PATH)
-    params: Tuple[Any, ...] | List[Tuple[Any, ...]] | None
+    params: Tuple[Any, ...] | List[Any] | dict | None
 
     if args:
         if len(args) == 1:
-            # Puede ser db_path o params; detectamos por tipo.
-            if isinstance(args[0], str):
-                db_path = args[0]
+            # Puede ser db_path o params
+            if isinstance(args[0], (str, os.PathLike)):
+                db_path = str(args[0])
                 params = kwargs.pop("params", ())
             else:
                 params = args[0]  # type: ignore[assignment]
         elif len(args) == 2:
             db_path, params = args  # type: ignore[assignment]
+            if isinstance(db_path, os.PathLike):
+                db_path = str(db_path)
         else:
             raise TypeError(
-                f"run_query() esperaba ≤3 posicionales, recibió {len(args) + 1}."
+                f"run_query() esperaba ≤3 posicionales, recibió {len(args)+1}."
             )
     else:
         params = kwargs.pop("params", ())
@@ -68,10 +70,17 @@ def run_query(sql: str, *args: Any, **kwargs: Any) -> pd.DataFrame:  # noqa: C90
     if kwargs:
         raise TypeError(f"run_query() argumentos inesperados: {list(kwargs)}")
 
+    # Normalización mínima
     params = params or ()
 
-    # ------------------ Ejecución ------------------
-    with sqlite3.connect(db_path) as conn:
+    # Defensa blanda: SELECT no usa 'lista de tuplas' (eso es patrón de executemany)
+    if isinstance(params, list) and params and isinstance(params[0], (tuple, list)):
+        raise TypeError(
+            "run_query(): 'params' no puede ser lista de tuplas/listas; "
+            "usa _execute_write(many=True) para escrituras."
+        )
+
+    with _get_conn(db_path) as conn:
         return pd.read_sql_query(sql, conn, params=params)
 
 
@@ -83,15 +92,9 @@ def _execute_write(
     timeout: int = 15,
     db_path: str = DB_PATH,
 ) -> None:
-    """INSERT/UPDATE/DELETE con *commit*.
-
-    *   **many=True** → usa *executemany*.
-    *   Param *params* opcional se normaliza a tupla vacía.
-    """
     params = params or ()
-    with sqlite3.connect(db_path, timeout=timeout) as conn:
+    with tx(db_path, immediate=True, timeout=timeout) as conn:
         (conn.executemany if many else conn.execute)(sql, params)  # type: ignore[arg-type]
-        conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -183,16 +186,14 @@ _run_product_insert = _execute_write
 _run_client_insert = _execute_write
 _run_vendor_insert = _execute_write
 
+
 # ---------------------------------------------------------------------------
 # 🏷️  Wrappers con lógica dedicada
 # ---------------------------------------------------------------------------
-
-
 def _run_log_to_sql(df: pd.DataFrame, table: str, *, db_path: str = DB_PATH) -> None:
-    """Carga un DataFrame en *table* (append) si no está vacío."""
     if df.empty:
         return
-    with sqlite3.connect(db_path, timeout=15) as conn:
+    with tx(db_path, immediate=False, timeout=15) as conn:
         df.to_sql(table, conn, if_exists="append", index=False)
 
 
@@ -200,20 +201,9 @@ def _run_forecast_insert_get_id(
     sql: str, params: Tuple[Any, ...], *, timeout: int = 15
 ) -> int:
     """INSERT y devuelve `lastrowid`."""
-    with sqlite3.connect(DB_PATH, timeout=timeout, isolation_level="DEFERRED") as conn:
+    with tx(DB_PATH, immediate=True, timeout=timeout) as conn:
         cursor = conn.execute(sql, params)
-        conn.commit()
         return int(cursor.lastrowid)
-
-
-@retry_sql_locked()
-def _run_log_write(
-    sql: str, params: Tuple[Any, ...], *, db_path: str = DB_PATH
-) -> None:  # noqa: D401
-    """INSERT/UPDATE con reintento cuando la base esté bloqueada."""
-    with sqlite3.connect(db_path, timeout=15) as conn:
-        conn.execute(sql, params)
-        conn.commit()
 
 
 def _duplicar_forecast_reasignacion(
@@ -222,81 +212,46 @@ def _duplicar_forecast_reasignacion(
     cardcodes: List[str],
 ) -> None:
     """Transacción compleja: duplica registros Forecast conservando histórico."""
-    with sqlite3.connect(DB_PATH, timeout=30) as conn:
-        try:
-            conn.execute("BEGIN")
-            for cc in cardcodes:
-                old_ids = [
-                    row[0]
-                    for row in conn.execute(
-                        """
-                        SELECT DISTINCT ForecastID
-                        FROM Forecast_Detalle
-                        WHERE SlpCode = ? AND CardCode = ?
-                        """,
-                        (slp_origen, cc),
-                    ).fetchall()
-                ]
-                for old_id in old_ids:
-                    new_id = conn.execute(
-                        """
-                        INSERT INTO Forecast (SlpCode, Fecha_Carga)
-                        VALUES (?, datetime('now','localtime'))
-                        """,
-                        (slp_destino,),
-                    ).lastrowid
-                    conn.execute(
-                        """
-                        INSERT INTO Forecast_Detalle (
-                            ForecastID, SlpCode, Linea, ItemCode, CardCode,
-                            OcrCode3, FechEntr, Cant, PrecioUN, DocCur, TipoForecast
-                        )
-                        SELECT
-                            ?, ?, Linea, ItemCode, CardCode,
-                            OcrCode3, FechEntr, Cant, PrecioUN, DocCur, TipoForecast
-                        FROM Forecast_Detalle
-                        WHERE ForecastID = ? AND SlpCode = ? AND CardCode = ?
-                        """,
-                        (new_id, slp_destino, old_id, slp_origen, cc),
+    with tx(DB_PATH, immediate=True, timeout=30) as conn:
+        for cc in cardcodes:
+            # ForecastIDs origen que pertenecen al vendedor y cliente indicados
+            old_ids = [
+                row[0]
+                for row in conn.execute(
+                    """
+                    SELECT DISTINCT ForecastID
+                    FROM Forecast_Detalle
+                    WHERE SlpCode = ? AND CardCode = ?
+                    """,
+                    (slp_origen, cc),
+                ).fetchall()
+            ]
+
+            for old_id in old_ids:
+                # Nueva cabecera para el vendedor destino
+                new_id = conn.execute(
+                    """
+                    INSERT INTO Forecast (SlpCode, Fecha_Carga)
+                    VALUES (?, datetime('now','localtime'))
+                    """,
+                    (slp_destino,),
+                ).lastrowid
+
+                # Duplicar el detalle apuntando al nuevo ForecastID y SlpCode destino
+                conn.execute(
+                    """
+                    INSERT INTO Forecast_Detalle (
+                        ForecastID, SlpCode, Linea, ItemCode, CardCode,
+                        OcrCode3, FechEntr, Cant, PrecioUN, DocCur, TipoForecast
                     )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-
-
-# ---------------------------------------------------------------------------
-# ✨ API pública
-# ---------------------------------------------------------------------------
-__all__ = [
-    # núcleo
-    "run_query",
-    "_execute_write",
-    # selects
-    "_run_admin_select",
-    "_run_forecast_select",
-    "_run_product_select",
-    "_run_client_select",
-    "_run_vendor_select",
-    "_run_reasig_select",
-    "_run_cf_select",
-    "_run_tab_select",
-    "_run_gestion_select",
-    "_run_home_select",
-    # writes
-    "_run_admin_insert",
-    "_run_forecast_write",
-    "_run_product_insert",
-    "_run_client_insert",
-    "_run_vendor_insert",
-    # especiales
-    "_run_log_to_sql",
-    "_run_forecast_insert_get_id",
-    "_run_log_write",
-    "_duplicar_forecast_reasignacion",
-]
-
-__all__.extend(["tx", "OperationalError"])
+                    SELECT
+                        ?, ?, Linea, ItemCode, CardCode,
+                        OcrCode3, FechEntr, Cant, PrecioUN, DocCur, TipoForecast
+                    FROM Forecast_Detalle
+                    WHERE ForecastID = ? AND SlpCode = ? AND CardCode = ?
+                    """,
+                    (new_id, slp_destino, old_id, slp_origen, cc),
+                )
 
 
 # Registro de inicialización por base de datos (evita ejecutar PRAGMAs repetidamente)
@@ -366,8 +321,7 @@ def tx(
 
 
 def _read_sql(db_path: str, sql: str, params: tuple = ()) -> pd.DataFrame:
-    with sqlite3.connect(db_path) as con:
-        return pd.read_sql_query(sql, con, params=params)
+    return run_query(sql, db_path, params=params)
 
 
 def deduplicar_detalle_por_clave(conn: sqlite3.Connection) -> int:
@@ -438,3 +392,165 @@ def deduplicar_detalle_por_clave(conn: sqlite3.Connection) -> int:
         raise
 
     return total_del
+
+
+# utils/db.py — NUEVO
+def _get_conn(db_path: str = DB_PATH, *, timeout: int = 30) -> sqlite3.Connection:
+    """Conexión con PRAGMAs consistentes (sin iniciar BEGIN)."""
+    _init_wal_once(db_path)
+    conn = sqlite3.connect(db_path, timeout=timeout, isolation_level=None)
+    conn.execute(f"PRAGMA busy_timeout={BUSY_MS};")
+    conn.execute("PRAGMA foreign_keys=ON;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    return conn
+
+
+@retry_sql_locked()
+def _run_log_write(
+    sql: str,
+    params: Tuple[Any, ...] | List[Tuple[Any, ...]] | dict | None = None,
+    *,
+    db_path: str = DB_PATH,
+    many: bool | None = None,
+    timeout: int = 15,
+) -> None:
+    """
+    Compat: escritura de logs con reintento ante 'database is locked'.
+    - Acepta tupla/dict => execute
+    - Acepta lista de tuplas => executemany
+    - Si 'many' viene explícito, fuerza el modo.
+    """
+    params = params or ()
+    if many is None:
+        many = (
+            isinstance(params, list) and params and isinstance(params[0], (list, tuple))
+        )
+    with tx(db_path, immediate=True, timeout=timeout) as conn:
+        if many:
+            conn.executemany(sql, params)  # type: ignore[arg-type]
+        else:
+            conn.execute(sql, params)  # type: ignore[arg-type]
+
+
+def connect(
+    db_path: str = DB_PATH,
+    *,
+    timeout: float = 30.0,
+    isolation_level: str | None = None,
+) -> sqlite3.Connection:
+    """
+    Compat wrapper: inicializa WAL/PRAGMAs y retorna una conexión cruda.
+    Útil cuando un consumidor usa `closing()` o maneja la conexión manualmente.
+    """
+    _init_wal_once(str(db_path))
+    return sqlite3.connect(
+        str(db_path), timeout=timeout, isolation_level=isolation_level
+    )
+
+
+def year_range(anio: Optional[int]) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Devuelve (ini, fin) como 'YYYY-01-01' y 'YYYY+1-01-01'.
+    Si anio es None o no convertible a int → (None, None).
+    """
+    if anio is None:
+        return None, None
+    try:
+        y = int(anio)
+    except (TypeError, ValueError):
+        return None, None
+    return f"{y:04d}-01-01", f"{y+1:04d}-01-01"
+
+
+def add_year_filter(sql_base: str, anio: Optional[int], *, col: str = "FechEntr"):
+    """
+    Devuelve (sql, params_extra) agregando AND … >= ? AND … < ? si hay año válido.
+    """
+    ini, fin = year_range(anio)
+    if ini is None:
+        return sql_base, ()
+    return f"{sql_base} AND {col} >= ? AND {col} < ?", (ini, fin)
+
+
+def _forecast_id_visible(
+    slpcode: int,
+    cardcode: str,
+    anio: int,
+    *,
+    db_path: str = DB_PATH,
+) -> int | None:
+    """
+    Devuelve el MAX(ForecastID) visible del año acotado por [anio-01-01, (anio+1)-01-01).
+    """
+    base = """
+    SELECT
+        MAX(fd.ForecastID) AS MaxID
+    FROM Forecast_Detalle fd
+    WHERE
+        fd.SlpCode  = ? AND
+        fd.CardCode = ?
+    """
+    # inserta filtro de año sobre fd.FechEntr
+    q, pextra = add_year_filter(base, anio, col="fd.FechEntr")
+    params = (slpcode, cardcode, *pextra)
+
+    try:
+        df = run_query(q, db_path, params)
+        if df.empty:
+            return None
+        # tolerante al nombre de columna devuelta por sqlite/pandas
+        col = next((c for c in df.columns if c.lower() == "maxid"), None)
+        if not col:
+            print("[FID][warn] columna MaxID no presente en resultado")
+            return None
+        val = df.at[0, col]
+        return None if pd.isna(val) else int(val)
+    except Exception as e:
+        print(f"[FID][warn] {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# ✨ API pública
+# ---------------------------------------------------------------------------
+__all__ = [
+    # núcleo
+    "run_query",
+    "_execute_write",
+    # selects
+    "_run_admin_select",
+    "_run_forecast_select",
+    "_run_product_select",
+    "_run_client_select",
+    "_run_vendor_select",
+    "_run_reasig_select",
+    "_run_cf_select",
+    "_run_tab_select",
+    "_run_gestion_select",
+    "_run_home_select",
+    # writes
+    "_run_admin_insert",
+    "_run_forecast_write",
+    "_run_product_insert",
+    "_run_client_insert",
+    "_run_vendor_insert",
+    # especiales
+    "_run_log_to_sql",
+    "_run_forecast_insert_get_id",
+    "_duplicar_forecast_reasignacion",
+]
+
+__all__.extend(
+    [
+        "DB_PATH",
+        "tx",
+        "OperationalError",
+        "DatabaseError",
+        "deduplicar_detalle_por_clave",
+        "_run_log_write",
+        "connect",
+        "year_range",
+        "add_year_filter",
+        "_forecast_id_visible",
+    ]
+)
