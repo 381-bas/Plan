@@ -9,8 +9,7 @@ from pathlib import Path
 from typing import Tuple, Optional, Any, Dict, Literal, Set
 from datetime import datetime
 from contextlib import nullcontext
-
-
+import unicodedata as _ud
 from hashlib import sha256
 from pandas.util import hash_pandas_object  # hash estructural
 from session_utils import (
@@ -25,6 +24,7 @@ from utils.db import (
     DB_PATH,
     run_query,
     _read_sql,
+    add_year_filter,
 )
 
 from utils.db import tx, deduplicar_detalle_por_clave
@@ -551,29 +551,44 @@ def _refrescar_buffer_ui(
 #    => reemplaza la versión anterior
 # ----------------------------------------------------------
 def forecast_prev(
-    slpcode: int, cardcode: str, anio: int, *, db_path: str
+    slpcode: int,
+    cardcode: str,
+    anio: int,
+    *,
+    db_path: str = DB_PATH,
 ) -> pd.DataFrame:
-
-    q = """
-    SELECT d.ItemCode, d.TipoForecast, d.OcrCode3,
-           strftime('%m', d.FechEntr) AS Mes,
-           d.Cant, d.FechEntr
-    FROM Forecast_Detalle d
-    JOIN Forecast f ON f.forecastid = d.ForecastID
-    WHERE f.SlpCode = ?
-      AND f.CardCode = ?
-      AND date(d.FechEntr) >= date(? || '-01-01')
-      AND date(d.FechEntr) <  date((? + 1) || '-01-01')
-    ORDER BY d.FechEntr
     """
-    df = run_query(q, params=(slpcode, cardcode, anio, anio), db_path=db_path)
-    if df.empty:
-        print("[FORECAST.PREV] sin filas")
-        return df
-    keys = ["ItemCode", "TipoForecast", "OcrCode3", "Mes"]
-    df = df.sort_values("FechEntr").drop_duplicates(keys, keep="last")
-    print(f"[FORECAST.PREV] filas={len(df)} (dedupe keep=last)")
-    return df
+    Histórico del año: consolida por día y tipo, usando límites [anio-01-01, (anio+1)-01-01).
+    Sin JOIN innecesario a Forecast; todo lo que necesitamos está en Forecast_Detalle.
+    """
+    anio = int(anio)
+    ini = f"{anio:04d}-01-01"
+    fin = f"{anio + 1:04d}-01-01"
+
+    sql = """
+    SELECT
+        d.ForecastID,
+        d.ItemCode,
+        d.CardCode,
+        d.TipoForecast,
+        d.OcrCode3,
+        date(d.FechEntr) AS FechEntrDate,
+        SUM(CASE WHEN d.TipoForecast='Firme'      THEN COALESCE(d.Cant,0)    ELSE 0 END) AS Cant_Firme,
+        SUM(CASE WHEN d.TipoForecast='Proyectado' THEN COALESCE(d.Cant,0)    ELSE 0 END) AS Cant_Proy,
+        AVG(CASE WHEN d.TipoForecast='Firme'      THEN NULLIF(d.PrecioUN,0)  END)        AS Precio_Firme,
+        AVG(CASE WHEN d.TipoForecast='Proyectado' THEN NULLIF(d.PrecioUN,0)  END)        AS Precio_Proy,
+        MAX(COALESCE(d.DocCur,'CLP')) AS DocCur
+    FROM Forecast_Detalle d
+    WHERE
+        d.SlpCode  = ? AND
+        d.CardCode = ? AND
+        date(d.FechEntr) >= date(?) AND
+        date(d.FechEntr)  < date(?)
+    GROUP BY
+        d.ForecastID, d.ItemCode, d.CardCode, d.TipoForecast, d.OcrCode3, date(d.FechEntr)
+    ORDER BY FechEntrDate ASC;
+    """
+    return run_query(sql, db_path, (slpcode, cardcode, ini, fin))
 
 
 # Función 5
@@ -1257,9 +1272,6 @@ def obtener_forecast_editable(
       - Métrica = 'Precio'    → precio mensual (último no-nulo del mes)
     NOTA: 'PrecioUN_ref' queda solo como referencia (no se usa en la UI).
     """
-    import numpy as np
-    import pandas as pd
-
     print("[CFE-002] ▶ start obtener_forecast_editable")
     print(
         f"[CFE-002] args: slp_code={slp_code}({type(slp_code).__name__}), card_code={card_code}({type(card_code).__name__}), anio={anio}, db_path={db_path}"
@@ -1276,28 +1288,16 @@ def obtener_forecast_editable(
     MONTHS = [f"{m:02d}" for m in range(1, 13)]
     idx_cols = ["ItemCode", "ItemName", "TipoForecast", "OcrCode3", "DocCur"]
 
-    # Rango de año (mejor para índices que strftime)
-    if anio is not None:
-        start_date = f"{int(anio):04d}-01-01"
-        end_date = f"{int(anio)+1:04d}-01-01"
-        filtro_id = "AND FechEntr >= ? AND FechEntr < ?"
-        filtro_det = "AND fd.FechEntr >= ? AND fd.FechEntr < ?"
-        params_rango = [start_date, end_date]
-    else:
-        filtro_id = ""
-        filtro_det = ""
-        params_rango = []
-
-    # 1) último ForecastID del cliente/año
-    q_last_id = f"""
+    # 1) último ForecastID del cliente/año (usa helper de rango)
+    q_last_id_base = """
         SELECT MAX(ForecastID) AS ForecastID
           FROM Forecast_Detalle
          WHERE SlpCode = ? AND CardCode = ?
-           {filtro_id}
     """.strip()
+    q_last_id, p_rango_id = add_year_filter(q_last_id_base, anio, col="FechEntr")
+    params_last = (slp_code, card_code, *p_rango_id)
 
-    params_last = [slp_code, card_code] + params_rango
-    df_last = run_query(q_last_id, db_path, tuple(params_last))
+    df_last = run_query(q_last_id, db_path, params_last)
     last_id = None if df_last.empty else df_last["ForecastID"].iloc[0]
     print(f"[CFE-002] último ForecastID detectado → {last_id}")
 
@@ -1325,8 +1325,8 @@ def obtener_forecast_editable(
         print("[CFE-002] ✅ done obtener_forecast_editable (vacío)")
         return empty
 
-    # 2) Traer detalle (sin agregación de precio)
-    query = f"""
+    # 2) Traer detalle (sin agregación de precio) + helper de rango
+    query_base = """
         WITH name_pick AS (
           SELECT
             o.ItemCode,
@@ -1361,13 +1361,13 @@ def obtener_forecast_editable(
         WHERE fd.ForecastID = ?
           AND fd.SlpCode    = ?
           AND fd.CardCode   = ?
-          {filtro_det}
     """.strip()
+    query, p_rango_det = add_year_filter(query_base, anio, col="fd.FechEntr")
 
-    params_main = [int(last_id), slp_code, card_code] + params_rango
-    print(f"[CFE-002] sql params(main): {tuple(params_main)}")
+    params_main = (int(last_id), slp_code, card_code, *p_rango_det)
+    print(f"[CFE-002] sql params(main): {params_main}")
 
-    df = run_query(query, db_path, tuple(params_main))
+    df = run_query(query, db_path, params_main)
     print(f"[CFE-002] raw result shape: {df.shape}")
 
     # Vacío con esquema estándar si no hay filas
@@ -2096,7 +2096,6 @@ def guardar_temp_local(cliente: str, df: pd.DataFrame):
 # B_VFD001: Validación estructural y de contenido del DataFrame de forecast
 # # ∂B_VFD001/∂B0
 def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
-    import unicodedata as _ud
 
     def _strip_accents(s: str) -> str:
         s = _ud.normalize("NFKD", s)

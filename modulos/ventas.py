@@ -9,6 +9,7 @@ import pandas as pd
 from utils.db import (
     run_query,
     DB_PATH,
+    _forecast_id_visible,
 )  # + lo que ya uses de utils.db (tx, etc.)
 
 
@@ -394,33 +395,6 @@ def _prefetch_vecinos(
         print(f"[PREFETCH][fatal] {_prefetch_vecinos.__name__} -> {e}")
 
 
-def _forecast_id_visible(
-    slpcode: int, cardcode: str, anio: int, db_path: str
-) -> int | None:
-    # Prioriza el ID que se guardó en esta sesión
-    skey = f"forecast_activo_{slpcode}_{cardcode}_{anio}"
-    if skey in st.session_state:
-        try:
-            return int(st.session_state[skey])
-        except Exception:
-            pass
-
-    q = """
-        SELECT MAX(fd.ForecastID)
-        FROM Forecast_Detalle fd
-        JOIN Forecast f
-          ON f.ForecastID = fd.ForecastID
-        WHERE f.SlpCode   = ?
-          AND fd.CardCode  = ?
-          AND fd.FechEntr >= ?
-          AND fd.FechEntr <  ?
-    """
-    df = run_query(q, db_path, (slpcode, cardcode, anio, anio))
-    if df.empty or pd.isna(df.loc[0, "MaxID"]):
-        return None
-    return int(df.loc[0, "MaxID"])
-
-
 # B_VFO001: Editor visual controlado y selección de cliente para forecast editable
 # # ∂B_VFO001/∂B0
 def vista_forecast(slpcode: int, _cardcode: str | None = None):
@@ -518,7 +492,7 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
         # Mostrar el último ForecastID visible (consultando DB)
         try:
             fid = _forecast_id_visible(
-                int(slpcode), str(cardcode), int(anio), DB_PATH_local
+                int(slpcode), str(cardcode), int(anio), db_path=DB_PATH_local
             )
             if fid is not None:
                 st.caption(f"Último ForecastID detectado → {fid}")
