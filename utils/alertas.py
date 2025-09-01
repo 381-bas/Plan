@@ -1,15 +1,13 @@
 ﻿# utils\alertas.py
-import sqlite3
 import json
 import time
 import hashlib
 import pandas as pd
 import streamlit as st
-from typing import Any, Tuple, List
+from typing import Any
 from datetime import datetime
-from contextlib import closing
 
-from utils.db import run_query, DB_PATH
+from utils.db import run_query, DB_PATH, tx, OperationalError
 from modulos.editor_forecast import _refrescar_buffer_ui
 
 
@@ -183,39 +181,30 @@ MAX_RETRY = 5  # reintentos ante DBLocked
 def _aplicar_cambios_alertas(
     df_original: pd.DataFrame, df_editado: pd.DataFrame
 ) -> None:
-    """
-    Detecta diferencias entre DF original y editado, persiste los cambios
-    (cantidad y/o fecha) en Forecast_Detalle con:
-        • transacción BEGIN IMMEDIATE + retry
-        • UPSERT (INSERT … ON CONFLICT … DO UPDATE)
-        • traza C2_TRACE con usuario, slpcode y hash de diff
-    """
-
-    # ── 0 · validación de datos — regla R1 ────────────────────────────
     if not df_alerta_is_valid(df_editado):
         st.error("❌ Datos incompletos o inválidos – corrige antes de guardar.")
         return
 
-    # ── 1 · diff: arma lista de cambios y log detallado ───────────────
-    cambios: List[Tuple[Any, ...]] = []
-    diff_log: List[dict] = []
-
-    print("[DEBUG-ALR] Columnas recibidas:", df_original.columns.tolist())
+    cambios = []  # (cant_new, fech_new, fech_old, forecast_id, card, item, tipo, ocr3)
+    diff_log = []
 
     for idx in df_original.index:
         old = df_original.loc[idx]
         new = df_editado.loc[idx]
-
         if (
             old["Cant_Forecast"] != new["Cant_Forecast"]
             or old["FechEntr"] != new["FechEntr"]
         ):
             cambios.append(
                 (
-                    new["Cant_Forecast"],  # SET Cant
-                    new["FechEntr"],  # SET FechEntr
-                    int(old["ForecastID"]),  # PK ForecastID
-                    old["ItemCode"],  # PK ItemCode
+                    float(new["Cant_Forecast"]),
+                    str(new["FechEntr"]),
+                    str(old["FechEntr"]),
+                    int(old["ForecastID"]),
+                    str(old["CardCode"]),
+                    str(old["ItemCode"]),
+                    str(old.get("TipoForecast", "Firme")),
+                    str(old.get("OcrCode3", "")),
                 )
             )
             diff_log.append(
@@ -234,41 +223,41 @@ def _aplicar_cambios_alertas(
         st.info("ℹ️ No se detectaron modificaciones.")
         return
 
-    # ── 2 · transacción + UPSERT con retry — reglas R2 & R3 ───────────
     user_email = st.session_state.get("user_email", "desconocido")
     intento, ok = 0, False
 
     while intento < MAX_RETRY and not ok:
         try:
-            with closing(sqlite3.connect(DB_PATH, timeout=5.0)) as conn, conn:
-                conn.execute("BEGIN IMMEDIATE;")
-
+            with tx(DB_PATH, immediate=True, timeout=5) as conn:
+                # 1) eliminar posible destino (si ya existe una fila en el nuevo mes)
                 conn.executemany(
                     """
-                    INSERT INTO Forecast_Detalle
-                           (Cant, FechEntr, ForecastID, ItemCode)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(ForecastID, ItemCode)
-                    DO UPDATE SET Cant     = excluded.Cant,
-                                  FechEntr = excluded.FechEntr;
+                    DELETE FROM Forecast_Detalle
+                    WHERE ForecastID=? AND CardCode=? AND ItemCode=? AND TipoForecast=? AND OcrCode3=? AND FechEntr=?;
                 """,
-                    cambios,
+                    [(c[3], c[4], c[5], c[6], c[7], c[1]) for c in cambios],
                 )
 
-                # ── 3 · C2_TRACE — regla R4 ──────────────────────────
-                payload = {
-                    "usuario": user_email,
-                    "diff": diff_log,
-                }
+                # 2) actualizar fila origen (mueve fecha y ajusta cantidad)
+                conn.executemany(
+                    """
+                    UPDATE Forecast_Detalle
+                       SET Cant     = ?,
+                           FechEntr = ?
+                     WHERE ForecastID=? AND CardCode=? AND ItemCode=? AND TipoForecast=? AND OcrCode3=? AND FechEntr=?;
+                """,
+                    [(c[0], c[1], c[3], c[4], c[5], c[6], c[7], c[2]) for c in cambios],
+                )
+
+                # 3) traza
+                payload = {"usuario": user_email, "diff": diff_log}
                 payload_hash = hashlib.sha256(
                     json.dumps(payload, default=str).encode()
                 ).hexdigest()
-
                 conn.execute(
                     """
                     INSERT INTO C2_TRACE
-                          (timestamp, usuario, slpcode, accion,
-                           bloque, severity, payload_hash, detalle)
+                          (timestamp, usuario, slpcode, accion, bloque, severity, payload_hash, detalle)
                     VALUES (?,?,?,?,?,?,?,?)
                 """,
                     (
@@ -283,11 +272,10 @@ def _aplicar_cambios_alertas(
                     ),
                 )
             ok = True
-
-        except sqlite3.OperationalError as e:
+        except OperationalError as e:
             if "database is locked" in str(e).lower():
                 intento += 1
-                time.sleep(0.6 * intento)  # back-off exponencial
+                time.sleep(0.6 * intento)
             else:
                 raise
 
@@ -295,18 +283,11 @@ def _aplicar_cambios_alertas(
         st.error("🚫 No se pudieron aplicar cambios por bloqueo de base.")
         return
 
-    # ── 4 · feedback UI + refresco de buffers ────────────────────────
     st.success(f"✅ {len(cambios)} cambios aplicados.")
-
-    # refresca sólo una vez por ForecastID editado
-    ids_para_refrescar = {c[2] for c in cambios}  # 3.er campo = ForecastID
-    for fc_id in ids_para_refrescar:
+    for fc_id in {d["ForecastID"] for d in diff_log}:
         _refrescar_buffer_ui(
-            forecast_id=fc_id,
-            key_buffer="buffer_alertas",  # ← pon aquí tu clave real
-            db_path=DB_PATH,
+            forecast_id=fc_id, key_buffer="buffer_alertas", db_path=DB_PATH
         )
-
     st.experimental_rerun()
 
 

@@ -5,12 +5,16 @@ Provide flexible helper functions that support both legacy and new call signatur
 """
 
 from __future__ import annotations
-
+from contextlib import contextmanager
+from threading import Lock
 import sqlite3
 import pandas as pd
 import time
 from functools import wraps
-from typing import Any, Callable, List, Tuple
+from typing import Any, Callable, List, Tuple, Iterator
+import os
+
+OperationalError = sqlite3.OperationalError
 
 # ---------------------------------------------------------------------------
 # 📌 Configuración global
@@ -18,6 +22,9 @@ from typing import Any, Callable, List, Tuple
 DB_PATH: str = (
     "C:/Users/qmkbantiman/OneDrive - QMK SPA/Informacion/quickpilot/Plan_Final_Final_Final.db"
 )
+
+DB_PATH = os.getenv("DB_PATH", DB_PATH)  # usa el ya definido en tu módulo
+BUSY_MS = 30_000
 
 # ---------------------------------------------------------------------------
 # 🔑 Núcleo limpio (lectura / escritura)
@@ -288,3 +295,146 @@ __all__ = [
     "_run_log_write",
     "_duplicar_forecast_reasignacion",
 ]
+
+__all__.extend(["tx", "OperationalError"])
+
+
+# Registro de inicialización por base de datos (evita ejecutar PRAGMAs repetidamente)
+__WAL_INIT = {}
+__WAL_LOCK = Lock()
+
+
+def _init_wal_once(db_path: str) -> None:
+    """
+    Inicializa la base en modo WAL y PRAGMAs globales una sola vez por `db_path`.
+    Idempotente y thread-safe.
+    """
+    if not db_path:
+        raise ValueError("DB path requerido")
+
+    with __WAL_LOCK:
+        if __WAL_INIT.get(db_path):
+            return
+
+        # Asegura el directorio destino si corresponde
+        dir_ = os.path.dirname(db_path)
+        if dir_ and not os.path.exists(dir_):
+            os.makedirs(dir_, exist_ok=True)
+
+        # Conexión corta para setear PRAGMAs globales
+        conn = sqlite3.connect(db_path, timeout=30, isolation_level=None)
+        try:
+            cur = conn.cursor()
+            # Journal WAL y parámetros razonables para escritorio / Streamlit
+            cur.execute("PRAGMA journal_mode=WAL;")
+            cur.execute("PRAGMA synchronous=NORMAL;")
+            cur.execute("PRAGMA foreign_keys=ON;")
+            cur.execute("PRAGMA busy_timeout=30000;")  # 30s
+            __WAL_INIT[db_path] = True
+        finally:
+            conn.close()
+
+
+@contextmanager
+def tx(
+    db_path: str = DB_PATH, *, immediate: bool = True, timeout: int = 30
+) -> Iterator[sqlite3.Connection]:
+    """
+    Abre una conexión configurada y maneja BEGIN/COMMIT/ROLLBACK de forma central.
+    immediate=True => BEGIN IMMEDIATE (reduce write contention).
+    """
+    _init_wal_once(db_path)  # asegura WAL/timeout globales 1 sola vez
+    conn = sqlite3.connect(db_path, timeout=timeout, isolation_level=None)
+    try:
+        conn.execute(f"PRAGMA busy_timeout={BUSY_MS};")
+        conn.execute("PRAGMA foreign_keys=ON;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        if immediate:
+            conn.execute("BEGIN IMMEDIATE;")
+        else:
+            conn.execute("BEGIN;")
+        yield conn
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def _read_sql(db_path: str, sql: str, params: tuple = ()) -> pd.DataFrame:
+    with sqlite3.connect(db_path) as con:
+        return pd.read_sql_query(sql, con, params=params)
+
+
+def deduplicar_detalle_por_clave(conn: sqlite3.Connection) -> int:
+    """
+    Limpia duplicados en Forecast_Detalle usando la clave REAL de BD:
+    (ForecastID, CardCode, ItemCode, TipoForecast, OcrCode3, FechEntr)
+    Conserva la mejor fila por clave (preferimos la que tenga más datos no nulos).
+    Retorna el número de filas eliminadas.
+    """
+    cur = conn.cursor()
+
+    # 1) Detectar claves duplicadas
+    sql_dups = """
+    SELECT ForecastID, CardCode, ItemCode, TipoForecast, OcrCode3, FechEntr, COUNT(*) as c
+    FROM Forecast_Detalle
+    GROUP BY ForecastID, CardCode, ItemCode, TipoForecast, OcrCode3, FechEntr
+    HAVING c > 1;
+    """
+    dups = cur.execute(sql_dups).fetchall()
+    if not dups:
+        print("[DUP.INFO] sin duplicados por clave")
+        return 0
+
+    print(f"[DUP.INFO] claves duplicadas={len(dups)}")
+
+    # 2) Por cada clave, elegir un ROWID 'ganador' (más completo) y borrar el resto
+    total_del = 0
+    keep_q = """
+    SELECT rowid
+    FROM Forecast_Detalle
+    WHERE ForecastID=? AND CardCode=? AND ItemCode=? AND TipoForecast=? AND OcrCode3=? AND FechEntr=?
+    ORDER BY (Cant IS NULL) ASC, (PrecioUN IS NULL) ASC, rowid DESC
+    LIMIT 1;
+    """
+    del_q = """
+    DELETE FROM Forecast_Detalle
+    WHERE ForecastID=? AND CardCode=? AND ItemCode=? AND TipoForecast=? AND OcrCode3=? AND FechEntr=?
+      AND rowid <> ?;
+    """
+
+    # Si no hay transacción externa, abrimos una local; si ya hay, reutilizamos
+    local_tx = not getattr(conn, "in_transaction", False)
+    if local_tx:
+        cur.execute("BEGIN IMMEDIATE;")
+        print("[SQL.BEGIN] BEGIN IMMEDIATE (dedup)")
+
+    try:
+        for fid, card, item, tipo, linea, fch, _c in dups:
+            keep_rowid = cur.execute(
+                keep_q, (fid, card, item, tipo, linea, fch)
+            ).fetchone()
+            if not keep_rowid:
+                continue
+            keep_rowid = keep_rowid[0]
+            cur.execute(del_q, (fid, card, item, tipo, linea, fch, keep_rowid))
+            total_del += cur.rowcount
+
+        if local_tx:
+            conn.commit()
+            print(f"[DUP.OK] eliminadas={total_del}")
+        else:
+            print(f"[DUP.OK] (tx externa) eliminadas={total_del}")
+    except Exception as e:
+        if local_tx:
+            conn.rollback()
+            print("[SQL.ROLLBACK]")
+        print(f"[DUP.ERROR] {e}")
+        raise
+
+    return total_del
