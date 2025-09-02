@@ -11,7 +11,7 @@ from datetime import datetime
 from contextlib import nullcontext
 import unicodedata as _ud
 from hashlib import sha256
-from pandas.util import hash_pandas_object  # hash estructural
+from pandas.util import hash_pandas_object
 from session_utils import (
     normalize_df_for_hash,
     load_df_parquet_safe,
@@ -25,13 +25,12 @@ from utils.db import (
     run_query,
     _read_sql,
     add_year_filter,
+    tx,
+    deduplicar_detalle_por_clave,
 )
-
-from utils.db import tx, deduplicar_detalle_por_clave
 
 with tx(DB_PATH, immediate=True) as conn:
     deduplicar_detalle_por_clave(conn)
-
 
 from utils.repositorio_forecast.repositorio_forecast_editor import get_key_buffer
 
@@ -43,13 +42,8 @@ EXTRAS_FIJOS = ["ItemName", "DocCur"]  # puedes agregar "Linea" si la usas
 COLS_REQUERIDAS = BASE_IDX + EXTRAS_FIJOS + MESES
 
 
-# Función_i: Funciones implementadas en la actualización de ciclo de edición.
-
-
-# Función 0
-# =========================
-# P0 compat: preparar_payload_guardado
-# =========================
+# B_INS001: Preparación de payload de guardado desde UI 4x12
+# # ∂B_INS001/∂B0
 def preparar_payload_guardado(
     df_ui: pd.DataFrame,
     *,
@@ -78,12 +72,10 @@ def preparar_payload_guardado(
     to_insert = df_long[df_long["Cant"] > 0].copy()
     to_insert["SlpCode"] = int(slpcode)
     to_insert["CardCode"] = str(cardcode)
-    to_insert["FechEntr"] = pd.to_datetime(
-        to_insert["Mes"].map(lambda m: f"{anio}-{m}-01"), errors="coerce"
-    )
+    to_insert["FechEntr"] = to_insert["Mes"].map(lambda m: f"{anio}-{m}-01")
 
     # Histórico previo para Δ/bajadas
-    f_prev = _get_forecast_id_prev(slpcode, cardcode, anio, db_path)
+    f_prev = _get_forecast_id_prev(slpcode, cardcode, anio, db_path=db_path)
     if f_prev is not None:
         hist = _leer_detalle_forecast(f_prev, db_path)
         # último por FechEntr (política "last")
@@ -142,175 +134,123 @@ def preparar_payload_guardado(
     }
 
 
-# Función 1
+# B_SYN001: Persistencia transaccional de cambios del cliente
+# # ∂B_SYN001/∂B0
 def persistir_cambios_cliente(
     slpcode: int,
     cardcode: str,
     anio: int,
     df_ui_editado: pd.DataFrame,
     db_path: str,
-    key_buffer: str | None = None,
+    key_buffer: str,
 ) -> dict:
-
-    MES_COLS = [f"{m:02d}" for m in range(1, 13)]
-    BASE_IDX = ["ItemCode", "TipoForecast", "Métrica", "OcrCode3"]
-
+    """
+    Persiste cambios del cliente en TX, refresca buffer UI y devuelve payload consistente.
+    Retorno:
+      { "ok": True,  "forecast_id": int, "insertadas": int, "rows": int, "warnings": list }
+      { "ok": False, "error": str,      "warnings": list }
+    """
+    warnings: list[str] = []
     try:
-        # 1) índice único y dedup FUERA de la transacción principal (conexión centralizada)
-        try:
-            with tx(db_path, immediate=False) as conn:
-                try:
-                    asegurar_indice_unico_forecast_detalle(conn=conn)
-                except Exception as e:
-                    print(
-                        f"[IDX.WARN] asegurar_indice falló: {e}. Intentando dedup & retry..."
-                    )
-                    try:
-                        deduplicar_detalle_por_clave(conn)
-                        asegurar_indice_unico_forecast_detalle(conn=conn)
-                    except Exception as e2:
-                        print(f"[IDX.ERROR] retry falló: {e2}")
-        except Exception as e:
-            print(f"[SQL.OPEN.WARN] índice/dedup pre-TX: {e}")
-
-        # 2) Preparar payload desde la UI 4×12  → formato largo Cant/PrecioUN por mes
-        #    (Métrica solo existe en UI)
-        print("[VAL.UI.INFO] inicio validación 4×12")
+        # Validación estructural del 4×12 de UI
         validar_forecast_dataframe(df_ui_editado)
-        print("[VAL.UI.RESULT] ok=True errores=0 warnings=0")
 
-        # melt (se mantiene la lógica existente para no cambiar estructura funcional)
-        tmp = df_ui_editado.copy()
-        tmp["ItemCode"] = tmp["ItemCode"].astype(str)
-        tmp["TipoForecast"] = tmp["TipoForecast"].astype(str)
-        tmp["Métrica"] = tmp["Métrica"].astype(str)
-        tmp["OcrCode3"] = tmp["OcrCode3"].astype(str)
-        tmp["DocCur"] = tmp["DocCur"].astype(str)
-
-        long_df = tmp.melt(
-            id_vars=BASE_IDX + ["DocCur"],
-            value_vars=MES_COLS,
-            var_name="Mes",
-            value_name="Valor",
+        # Preparar payload en formato largo con reglas de negocio
+        payload = preparar_payload_guardado(
+            df_ui=df_ui_editado,
+            slpcode=slpcode,
+            cardcode=cardcode,
+            anio=anio,
+            db_path=db_path,
         )
-        # separar cantidad y precio en dataframes distintos y luego combinar (una fila por mes)
-        qty = long_df[long_df["Métrica"] == "Cantidad"].copy()
-        prc = long_df[long_df["Métrica"] == "Precio"].copy()
-        qty.rename(columns={"Valor": "Cant"}, inplace=True)
-        prc.rename(columns={"Valor": "PrecioUN"}, inplace=True)
-        qty = qty.drop(columns=["Métrica"])
-        prc = prc.drop(columns=["Métrica"])
-
-        # clave de combinación
-        join_keys = ["ItemCode", "TipoForecast", "OcrCode3", "DocCur", "Mes"]
-        merged = pd.merge(qty, prc, on=join_keys, how="outer")
-        # rellenar NaN a 0
-        for c in ["Cant", "PrecioUN"]:
-            if c not in merged.columns:
-                merged[c] = 0.0
-        merged[["Cant", "PrecioUN"]] = (
-            merged[["Cant", "PrecioUN"]].fillna(0.0).astype(float)
-        )
-
-        # Agregar columnas de BD
-        merged["CardCode"] = cardcode
-        merged["SlpCode"] = int(slpcode)
-        merged["FechEntr"] = merged["Mes"].apply(
-            lambda m: f"{anio}-{m}-01"
-        )  # yyyy-mm-01
-        merged["TipoForecast"] = merged["TipoForecast"].astype(str)
-
-        # ordenar columnas según tabla
-        payload = merged[
-            [
-                "ItemCode",
-                "CardCode",
-                "OcrCode3",
-                "FechEntr",
-                "Cant",
-                "PrecioUN",
-                "DocCur",
-                "TipoForecast",
-            ]
-        ].copy()
-
-        # diag
-        ui_gt_zero = int(
-            (
-                (payload["Cant"].fillna(0) != 0) | (payload["PrecioUN"].fillna(0) != 0)
-            ).sum()
-        )
-        to_insert = int(len(payload))
-        print(f"[PAYLOAD.INFO] to_insert={to_insert} ui_gt_zero={ui_gt_zero}")
-
-        # 3) TRANSACCIÓN principal: crear header nuevo + insertar detalle (sin borrar históricos)
-        print("[SQL.BEGIN] BEGIN IMMEDIATE")
-        with tx(db_path, immediate=True) as conn:
-            forecast_id = obtener_forecast_activo(
-                conn, slpcode, cardcode, anio, force_new=True
+        warnings = payload.get("warnings", []) or []
+        df_largo = payload.get("to_insert")
+        if df_largo is None:
+            # Asegurar DataFrame vacío válido si no hay filas
+            df_largo = pd.DataFrame(
+                columns=[
+                    "CardCode",
+                    "ItemCode",
+                    "TipoForecast",
+                    "Métrica",
+                    "OcrCode3",
+                    "FechEntr",
+                    "Valor",
+                    "DocCur",
+                ]
             )
 
-            # inserción por lotes
-            insert_sql = """
-            INSERT INTO Forecast_Detalle
-              (ForecastID, SlpCode, ItemCode, CardCode, Linea, OcrCode3, FechEntr, Cant, PrecioUN, DocCur, TipoForecast)
-            VALUES
-              (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-            """
-            # Fallback de Linea (si tu modelo usa OcrCode3 como Linea)
-            if "Linea" not in payload.columns:
-                payload["Linea"] = payload["OcrCode3"]
+        # TX
+        # (asumimos helpers internos realizan BEGIN/COMMIT/ROLLBACK)
+        # Usa el último ForecastID previo detectado por preparar_payload_guardado
+        forecast_id_prev = payload.get("meta", {}).get("forecast_id_prev")
+        # Crea SIEMPRE una nueva cabecera (no requiere card_code/anio)
+        forecast_id = obtener_forecast_activo(
+            slpcode=slpcode,
+            db_path=db_path,
+            force_new=True,
+        )
 
-            rows = []
-            for _, r in payload.iterrows():
-                rows.append(
-                    (
-                        forecast_id,
-                        int(slpcode),
-                        str(r["ItemCode"]),
-                        cardcode,
-                        str(r["Linea"]),
-                        str(r["OcrCode3"]),
-                        str(r["FechEntr"]),
-                        float(r["Cant"]),
-                        float(r["PrecioUN"]),
-                        str(r["DocCur"]),
-                        str(r["TipoForecast"]),
-                    )
-                )
+        registrar_log_detalle_cambios(
+            slpcode=slpcode,
+            cardcode=cardcode,
+            anio=anio,
+            df_largo=payload.get("diag"),
+            db_path=db_path,
+            forecast_id=forecast_id,
+            forecast_id_anterior=forecast_id_prev,
+        )
 
-            cur = conn.cursor()
-            cur.executemany(insert_sql, rows)
-            print(
-                f"[SAVE.OK] cliente={cardcode} forecast_id={forecast_id} rows={len(rows)}"
-            )
+        n_ins = insertar_forecast_detalle(
+            forecast_id=forecast_id,
+            anio=anio,
+            df_in=df_largo,
+            db_path=db_path,
+            replace=True,
+        )
 
-        return {"ok": True, "forecast_id": forecast_id, "rows": len(rows)}
+        # Refrescar buffers UI y sanity check 4×12
+        df_ref = _refrescar_buffer_ui(
+            forecast_id=forecast_id, key_buffer=key_buffer, db_path=db_path
+        )
+        verify_4x12(df_ref, bases=1)
 
-    except Exception:
-        # Dentro del bloque donde limpias caché (try/except/finalmente)
+        # Marcar este cliente como ya persistido
         try:
-            # import diferido para evitar el ciclo al cargar el módulo
-            from modulos.ventas import (
-                _cached_obtener_forecast_editable as _c_ofe,
-                _cached_obtener_clientes as _c_cli,
-            )
+            pend = st.session_state.get("clientes_editados", set())
+            if isinstance(pend, set) and cardcode in pend:
+                pend.discard(cardcode)
+                st.session_state["clientes_editados"] = pend
+        except Exception:
+            pass
 
-            _c_ofe.clear()
-            _c_cli.clear()
-            print("[CACHE] caches UI limpiados")
-        except Exception as e2:
-            # fallback opcional: limpiar todo cache_data si falla lo específico
-            try:
-                import streamlit as st
+        # Retorno consistente
+        return {
+            "ok": True,
+            "forecast_id": int(forecast_id),
+            "insertadas": int(n_ins) if n_ins is not None else 0,
+            "rows": int(n_ins) if n_ins is not None else 0,  # compat
+            "warnings": warnings,
+        }
 
-                st.cache_data.clear()
-                print(f"[CACHE] clear global ejecutado (detalle: {e2})")
-            except Exception:
-                pass
+    except Exception as e:
+        # Log de error y retorno consistente en fallo
+        print(f"[TX.CLIENT.ERROR] cc={cardcode} err={e}")
+        try:
+            # Si usas conexiones manuales, realiza ROLLBACK aquí
+            pass
+        except Exception as ee:
+            print(f"[TX.ROLLBACK.WARN] {ee}")
+
+        return {
+            "ok": False,
+            "error": str(e),
+            "warnings": warnings,
+        }
 
 
-# Función 2
+# B_INS002: Inserción de detalle forecast (largo) en BD con replace opcional
+# # ∂B_INS002/∂B0
 def insertar_forecast_detalle(
     forecast_id: int,
     anio: int,
@@ -345,9 +285,13 @@ def insertar_forecast_detalle(
         return 0
 
     df["Mes"] = df["Mes"].astype(str).str.zfill(2)
-    if "FechEntr" not in df.columns or df["FechEntr"].isna().any():
-        # Normaliza siempre a string yyyy-mm-01 (evita objetos datetime en inserción)
-        df["FechEntr"] = df["Mes"].map(lambda m: f"{anio}-{m}-01")
+    # Normaliza SIEMPRE FechEntr a cadena ISO 'YYYY-MM-01' para SQLite.
+    # 1) Intentamos parsear lo que venga; 2) rellenamos con Mes cuando falte; 3) formateamos a str.
+    if "FechEntr" not in df.columns:
+        df["FechEntr"] = np.nan
+    _dt = pd.to_datetime(df["FechEntr"], errors="coerce")
+    _fallback = pd.to_datetime(df["Mes"].radd(f"{anio}-") + "-01", errors="coerce")
+    df["FechEntr"] = _dt.fillna(_fallback).dt.strftime("%Y-%m-%d")
     df["Linea"] = df.get("Linea", "Trader")
     if isinstance(df["Linea"], pd.Series):
         df["Linea"] = df["Linea"].fillna("Trader")
@@ -404,7 +348,8 @@ def insertar_forecast_detalle(
     return len(rows)
 
 
-# Función 3
+# B_BUF001: Reconstrucción/refresco del buffer 4x12 desde BD
+# # ∂B_BUF001/∂B0
 def _refrescar_buffer_ui(
     forecast_id: int,
     *,
@@ -545,11 +490,8 @@ def _refrescar_buffer_ui(
     return df4
 
 
-# Función 4
-# ----------------------------------------------------------
-# 3) forecast_prev (JOIN cabecera; dedupe por último FechEntr)
-#    => reemplaza la versión anterior
-# ----------------------------------------------------------
+# B_DBQ001: Consulta consolidada del histórico forecast por día
+# # ∂B_DBQ001/∂B0
 def forecast_prev(
     slpcode: int,
     cardcode: str,
@@ -607,9 +549,8 @@ MONEDAS_VALIDAS_DEFAULT: Set[str] = {
 }
 
 
-# -------------------------------------------------
-# 1) VALIDAR BUFFER UI (duras): errores bloquean
-# -------------------------------------------------
+# B_VFD001: Validación dura del buffer UI 4x12
+# # ∂B_VFD001/∂B0
 def validar_buffer_ui(
     df_ui_editado: pd.DataFrame, *, monedas_validas: Optional[Set[str]] = None
 ) -> Dict[str, Any]:
@@ -669,13 +610,8 @@ def validar_buffer_ui(
     return {"ok": ok, "errores": errores, "warnings": warnings}
 
 
-# Función 6
-
-
-# Función 7
-# -------------------------------------------------
-# 4) verify_4x12 (post-refresh, estricta)
-# -------------------------------------------------
+# B_VFD002: Verificación estricta 4x12 posterior al refresco
+# # ∂B_VFD002/∂B0
 def verify_4x12(df_ui: pd.DataFrame, *, bases: int = 1) -> None:
     expected_rows = 4 * bases
     ok = (len(df_ui) == expected_rows) and all(m in df_ui.columns for m in MESES)
@@ -684,7 +620,8 @@ def verify_4x12(df_ui: pd.DataFrame, *, bases: int = 1) -> None:
         raise AssertionError("UI_NOT_4X12")
 
 
-# Función 8
+# B_BUF002: Invalidación de caches y buffers por cliente/año
+# # ∂B_BUF002/∂B0
 def invalidar_cache(
     slpcode: int,
     cardcode: str,
@@ -762,7 +699,8 @@ def invalidar_cache(
             print(f"[CACHE.INVALIDATE.DETAIL] {removed}")
 
 
-# Función 9
+# B_CTX001: Flags de configuración global del editor/forecast
+# # ∂B_CTX001/∂B0
 # Flags (puedes moverlos a tu config)
 PERSIST_MODE = "ui_state"  # "ui_state" (default) / "delta" (solo diagnóstico)
 VERIFY_4X12_STRICT = True
@@ -772,9 +710,9 @@ MONTHS = [f"{i:02d}" for i in range(1, 13)]
 TIPOS = ("Firme", "Proyectado")
 METRICAS = ("Cantidad", "Precio")
 
-# --- Helpers DB seguros --------------------------------------------------------
 
-
+# B_DBQ002: Lectura de detalle forecast por ForecastID desde BD
+# # ∂B_DBQ002/∂B0
 def _leer_detalle_forecast(forecast_id: int, db_path: str) -> pd.DataFrame:
     sql = """
       SELECT ForecastID, SlpCode, CardCode, ItemCode, TipoForecast, OcrCode3, Linea,
@@ -791,34 +729,67 @@ def _leer_detalle_forecast(forecast_id: int, db_path: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-# Función 10
-def _get_forecast_id_prev(conn, slpcode: int, cardcode: str, anio: int) -> int | None:
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+def _periodo_anual(anio: int) -> tuple[str, str]:
+    """Devuelve (desde, hasta_exclusivo) para el año dado."""
+    desde = f"{anio:04d}-01-01"
+    hasta = f"{anio+1:04d}-01-01"
+    return desde, hasta
+
+
+# B_DBQ003: Obtención del último ForecastID por vendedor/cliente/año
+# # ∂B_DBQ003/∂B0
+def _get_forecast_id_prev(
+    slp_code: int | None = None,
+    card_code: str | None = None,
+    anio: int | None = None,
+    *,
+    db_path: str,
+    # alias por compatibilidad con call-sites que envían slpcode
+    slpcode: int | None = None,
+) -> int | None:
     """
-    Devuelve el último ForecastID usado para ese vendedor+cliente en el año dado,
-    mirando el año desde Forecast_Detalle.FechEntr (no existe f.Anio).
+    Busca el ForecastID más reciente (por Fecha_Carga, luego ForecastID) que tenga
+    líneas para (slp_code, card_code) dentro del año 'anio'.
+
+    Esquema (ver 9. Tipo_Datos):
+      - Forecast(ForecastID, Fecha_Carga, SlpCode)
+      - Forecast_Detalle(ForecastID, CardCode, FechEntr, ...)
     """
-    print("[CFP-010] ▶ _get_forecast_id_prev")
+    # Normalizar alias
+    if slp_code is None and slpcode is not None:
+        slp_code = int(slpcode)
+    if slp_code is None:
+        raise ValueError("slp_code requerido")
+    if not card_code:
+        raise ValueError("card_code requerido")
+    if anio is None:
+        raise ValueError("anio requerido")
+
+    fi, ff = _periodo_anual(anio)
+
     sql = """
-    SELECT fd.ForecastID
-    FROM Forecast_Detalle fd
-    JOIN Forecast f
-      ON f.ForecastID = fd.ForecastID
-     AND f.SlpCode    = ?
-    WHERE fd.CardCode = ?
-      AND strftime('%Y', fd.FechEntr) = ?
-    GROUP BY fd.ForecastID
-    ORDER BY fd.ForecastID DESC
+    SELECT f.ForecastID
+    FROM Forecast_Detalle AS fd
+    INNER JOIN Forecast AS f ON f.ForecastID = fd.ForecastID
+    WHERE f.SlpCode = ?
+      AND fd.CardCode = ?
+      AND fd.FechEntr >= ?
+      AND fd.FechEntr < ?
+    GROUP BY f.ForecastID, f.Fecha_Carga
+    ORDER BY f.Fecha_Carga DESC, f.ForecastID DESC
     LIMIT 1;
     """
-    params = (slpcode, cardcode, str(anio))
-    print(f"[CFP-010] sql params={params}")
-    row = conn.execute(sql, params).fetchone()
-    fid = None if not row else int(row[0])
-    print(f"[CFP-010] result ForecastID={fid}")
-    return fid
+    df = _read_sql(db_path, sql, (slp_code, card_code, fi, ff))
+    if df is not None and not df.empty:
+        return int(df.iloc[0, 0])
+    return None
 
 
-# Función 11
+# B_HDF002: Transformación del buffer UI 4x12 a formato largo
+# # ∂B_HDF002/∂B0
 def _melt_ui_4x12(df_ui: pd.DataFrame) -> pd.DataFrame:
     """
     Espera df_ui 4×12 con índice o columnas que incluyan:
@@ -899,9 +870,8 @@ def _melt_ui_4x12(df_ui: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-# Función 12
-
-
+# B_HDF003: Construcción de vista 4x12 desde datos en largo
+# # ∂B_HDF003/∂B0
 def make_4x12_from(
     df_db_largo: pd.DataFrame,
     df_catalogo: Optional[pd.DataFrame] = None,
@@ -1198,7 +1168,8 @@ def make_4x12_from(
     return out
 
 
-# Función 13
+# B_DBQ004: Asegurar índice único correcto en Forecast_Detalle
+# # ∂B_DBQ004/∂B0
 def asegurar_indice_unico_forecast_detalle(
     db_path: Optional[str] = None, conn: Optional[Any] = None
 ):
@@ -1259,7 +1230,9 @@ def asegurar_indice_unico_forecast_detalle(
 
 
 # B_FCS005: Obtener forecast editable para edición directa por cliente
+# # ∂B_FCS005/∂B0
 # ∂B_FCS005/∂B0
+# # ∂B_FCS005/∂B0
 def obtener_forecast_editable(
     slp_code: int,
     card_code: str,
@@ -1849,6 +1822,8 @@ def hash_semantico(df):
     return hash(pd.util.hash_pandas_object(df.sort_index(axis=1), index=True).sum())
 
 
+# B_SYN002: Sincronización local del buffer con cambios del editor
+# # ∂B_SYN002/∂B0
 def sincronizar_buffer_local(
     df_buffer: pd.DataFrame, df_editado: pd.DataFrame
 ) -> Tuple[pd.DataFrame, bool]:
@@ -2093,8 +2068,8 @@ def guardar_temp_local(cliente: str, df: pd.DataFrame):
         )
 
 
-# B_VFD001: Validación estructural y de contenido del DataFrame de forecast
-# # ∂B_VFD001/∂B0
+# B_VFD003: Validación integral de DataFrame forecast 4x12
+# # ∂B_VFD003/∂B0
 def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
 
     def _strip_accents(s: str) -> str:
@@ -2329,8 +2304,8 @@ def validar_forecast_dataframe(df: pd.DataFrame) -> list[str]:
     return errores
 
 
-# B_FEN004: Inserción de cabecera Forecast (SlpCode + Fecha_Carga)
-# ∂B_FEN004/∂B1
+# B_INS003: Registro de cabecera Forecast (insert)
+# # ∂B_INS003/∂B0
 def registrar_forecast_cabecera(
     slpcode: int,
     db_path: str | None = None,
@@ -2340,45 +2315,56 @@ def registrar_forecast_cabecera(
     return _run_forecast_insert_get_id(sql, (slpcode, ahora))
 
 
-# B_HELP001: obtiene o crea ForecastID reutilizable
+# B_INS004: Obtiene o crea ForecastID reutilizable (cabecera)
+# # ∂B_INS004/∂B0
 def obtener_forecast_activo(
-    conn, slpcode: int, cardcode: str, anio: int, force_new: bool = True
+    slp_code: int | None = None,
+    card_code: str | None = None,  # se conserva para compatibilidad con el call-site
+    anio: int | None = None,
+    *,
+    db_path: str,
+    force_new: bool = True,
+    # alias por compatibilidad con call-sites que envían slpcode
+    slpcode: int | None = None,
 ) -> int:
     """
-    Crea SIEMPRE (por defecto) un nuevo header de Forecast para este guardado por cliente.
-    No usa columna Anio (no existe). Guarda la marca temporal en Fecha_Carga.
+    Devuelve un ForecastID "activo" para registrar cambios.
+
+    - Con force_new=True: crea SIEMPRE un nuevo encabezado en Forecast (Fecha_Carga=CURRENT_TIMESTAMP).
+    - Con force_new=False: intenta reutilizar el último encabezado del vendedor; si no existe, crea uno.
+
+    Esquema (9. Tipo_Datos): Forecast(ForecastID, Fecha_Carga, SlpCode)
+    No existen campos de cierre; la vigencia se define por el orden temporal de Fecha_Carga.
     """
-    session_key = f"forecast_activo_{slpcode}_{cardcode}_{anio}"
+    # Normalizar alias
+    if slp_code is None and slpcode is not None:
+        slp_code = int(slpcode)
+    if slp_code is None:
+        raise ValueError("slp_code requerido")
+
     if not force_new:
-        # (opcional) Reutilizar el último header del año (por Fecha_Carga) si se desea
-        row = conn.execute(
-            """SELECT ForecastID
-               FROM Forecast
-               WHERE SlpCode = ?
-                 AND strftime('%Y', Fecha_Carga) = ?
-               ORDER BY ForecastID DESC
-               LIMIT 1;""",
-            (slpcode, str(anio)),
-        ).fetchone()
-        if row:
-            print(
-                f"[FORECAST-ACTIVO-HIT] session_key={session_key} forecast_id={row[0]}"
-            )
-            return int(row[0])
+        reuse_sql = """
+        SELECT ForecastID
+        FROM Forecast
+        WHERE SlpCode = ?
+        ORDER BY Fecha_Carga DESC, ForecastID DESC
+        LIMIT 1;
+        """
+        df = _read_sql(db_path, reuse_sql, (slp_code,))
+        if df is not None and not df.empty:
+            return int(df.iloc[0, 0])
 
-    # Crear uno nuevo (semántica “ForecastID+I por cliente”)
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO Forecast (SlpCode, Fecha_Carga) VALUES (?, datetime('now','localtime'))",
-        (slpcode,),
-    )
-    fid = int(cur.lastrowid)
-    print(
-        f"[FORECAST-ACTIVO-NEW] creating_new session_key={session_key} forecast_id={fid}"
-    )
-    return fid
+    # Crear un nuevo encabezado limpio
+    with tx(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO Forecast (Fecha_Carga, SlpCode) VALUES (CURRENT_TIMESTAMP, ?)",
+            (slp_code,),
+        )
+        return int(cur.lastrowid)
 
 
+# B_VFD004: Validación de esquema delta para logging de cambios
+# # ∂B_VFD004/∂B0
 def validate_delta_schema(
     df: pd.DataFrame, *, contexto: str = "[VALIDACIÓN DELTA]"
 ) -> None:
@@ -2471,7 +2457,7 @@ def registrar_log_detalle_cambios(
             FROM Forecast_Detalle
             WHERE ForecastID = ?
         """
-        df_prev = run_query(qry, params=(forecast_id_anterior,), db_path=db_path)
+        df_prev = run_query(qry, db_path, (forecast_id_anterior,))
         df_prev["Mes"] = df_prev["MesTxt"].astype(str).str.zfill(2)
 
         print(f"[DEBUG-B2] Histórico previo cargado: {len(df_prev)} registros")

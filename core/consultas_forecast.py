@@ -290,6 +290,8 @@ def obtener_nombre_vendedor(db_path: str):
     return _run_cf_select("SELECT SlpCode, SlpName FROM OSLP")
 
 
+# B_FCS014: Lista de vendedores con forecast para el año
+# # ∂B_FCS014/∂B0
 def vendedores_con_forecast(db_path: str, anio: int) -> pd.DataFrame:
     """
     Lista de vendedores con forecast para el año `anio`.

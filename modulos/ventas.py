@@ -2,29 +2,30 @@
 # # ∂B_VIN002/∂B0
 import hashlib
 from pathlib import Path
-from typing import Optional
 import numpy as np
 import streamlit as st
 import pandas as pd
+import json
+import time
 from utils.db import (
     run_query,
     DB_PATH,
     _forecast_id_visible,
-)  # + lo que ya uses de utils.db (tx, etc.)
+)
 
 
-from config.contexto import obtener_anio  # ∂
+from config.contexto import obtener_anio
 from core.consultas_forecast import (
-    obtener_clientes,  # ∂B
+    obtener_clientes,
 )
 from core.historico import vista_historico
 from core.stock import vista_stock
 from modulos.editor_forecast import (
-    inicializar_buffer_cliente,  # ∂B
-    obtener_forecast_editable,  # ∂B
+    inicializar_buffer_cliente,
+    obtener_forecast_editable,
     persistir_cambios_cliente,
-    sincronizar_buffer_local,  # ∂B
-    validar_forecast_dataframe,  # ∂B
+    sincronizar_buffer_local,
+    validar_forecast_dataframe,
 )
 from modulos.ventas_facturas_snippet import mostrar_facturas
 from utils.alertas import (
@@ -32,30 +33,25 @@ from utils.alertas import (
 )
 
 
-# --- util: reconstruir DF guardable desde el buffer de sesión ---
-def _df_to_save_from_session(cardcode: str) -> Optional[pd.DataFrame]:
-    key_buffer = f"forecast_buffer_{cardcode}"
-    df_buf = st.session_state.get(key_buffer)
-    if df_buf is None or not isinstance(df_buf, pd.DataFrame):
-        print(f"[BATCH.WARN] buffer ausente para {cardcode}")
-        return None
-    base_idx = [
-        c
-        for c in ["ItemCode", "TipoForecast", "Métrica", "OcrCode3"]
-        if c in df_buf.columns
-    ]
-    try:
-        df = df_buf
-        if not df.index.names or any(n is None for n in df.index.names):
-            # por si quedó reseteado
-            df = df.set_index(base_idx).sort_index()
-        return df.reset_index()
-    except Exception as e:
-        print(f"[BATCH.WARN] no se pudo reconstruir df_to_save para {cardcode}: {e}")
-        return None
+# B_BUF001: Reconstrucción de DF guardable desde buffer de sesión
+# # ∂B_BUF001/∂B0
+def _df_to_save_from_session(cc: str) -> pd.DataFrame | None:
+    """Obtiene el 4×12 guardable desde session_state para el cliente cc."""
+    key_buffer = f"forecast_buffer_{cc}"
+    key_mirror = f"{key_buffer}_editado"
+    ui_snap = f"{key_mirror}__ui_snapshot"
+
+    df = st.session_state.get(key_buffer)
+    if df is None or not isinstance(df, pd.DataFrame):
+        df = st.session_state.get(key_mirror)
+    if df is None or not isinstance(df, pd.DataFrame):
+        df = st.session_state.get(ui_snap)
+
+    return df.copy() if isinstance(df, pd.DataFrame) else None
 
 
-# --- helper para resolver la ruta de la DB de forma consistente ---
+# B_CTX001: Resolución de la ruta efectiva de la base de datos
+# # ∂B_CTX001/∂B0
 def get_db_path() -> str:
     """
     Devuelve el path efectivo de la base de datos.
@@ -67,67 +63,102 @@ def get_db_path() -> str:
         return str(DB_PATH)
 
 
-# ---------- Guardado batch de múltiples clientes editados ----------
+# B_INS001: Guardado en lote de ediciones de múltiples clientes
+# # ∂B_INS001/∂B0
 def _guardar_ediciones_en_lote(
     slpcode: int,
     anio: int,
     db_path: str,
-    current_cardcode: str,
-    df_to_save_actual: Optional[pd.DataFrame],  # del cliente visible (ya sincronizado)
 ) -> dict:
-    if st.session_state.get("_saving_global", False):
-        return {"ok": False, "error": "saving_global_en_curso"}
+    """
+    Orquestador batch: toma clientes desde st.session_state['clientes_editados'],
+    reconstruye su 4×12 desde sesión y llama a persistir_cambios_cliente(...).
+    Retorna: { "ok": bool, "oks": [...], "fails": [...] }
+    """
+    objetivos = list(st.session_state.get("clientes_editados", set()) or [])
+    objetivos = [str(cc) for cc in objetivos]
+    print(f'[TX][BATCH.START] {{"n": {len(objetivos)}, "objetivos": {objetivos}}}')
 
-    st.session_state["_saving_global"] = True
-    try:
-        editados: set[str] = set(st.session_state.get("clientes_editados", set()))
-        # incluir cliente actual si tiene cambios en staging y aún no está en el set
-        if df_to_save_actual is not None:
-            editados.add(current_cardcode)
+    oks: list[dict] = []
+    fails: list[dict] = []
 
-        targets = sorted(editados)
-        print(f"[BATCH.SAVE] start targets={targets}")
+    for cc in objetivos:
+        try:
+            key_buffer = f"forecast_buffer_{cc}"
+            df_ui = _df_to_save_from_session(cc)
 
-        resultados = []
-        for cc in targets:
-            df_to_save = (
-                df_to_save_actual
-                if cc == current_cardcode
-                else _df_to_save_from_session(cc)
-            )
-            if df_to_save is None or df_to_save.empty:
-                resultados.append(
-                    {"cardcode": cc, "ok": False, "error": "df_to_save vacío o ausente"}
-                )
-                print(f"[BATCH.SAVE.SKIP] {cc} df vacío")
+            if df_ui is None or not isinstance(df_ui, pd.DataFrame) or df_ui.empty:
+                msg = "df_to_save vacío o ausente"
+                print(f'[TX][CLIENT.FAIL] {{"cc": "{cc}", "error": "{msg}"}}')
+                fails.append({"cardcode": cc, "error": msg})
                 continue
 
+            # Normaliza a 4×12 con índice base si fuera necesario
+            base_idx = [
+                c
+                for c in ["ItemCode", "TipoForecast", "Métrica", "OcrCode3"]
+                if c in df_ui.columns
+            ]
+            if base_idx:
+                try:
+                    df_ui = (
+                        df_ui.reset_index()
+                        if isinstance(df_ui.index, pd.MultiIndex)
+                        else df_ui
+                    )
+                    df_ui = df_ui.set_index(base_idx).sort_index().reset_index()
+                except Exception:
+                    # si falla el set_index, seguimos con df_ui tal como está
+                    pass
+
             res = persistir_cambios_cliente(
-                slpcode=slpcode,
-                cardcode=cc,
-                anio=anio,
-                df_ui_editado=df_to_save,
+                slpcode=int(slpcode),
+                cardcode=str(cc),
+                anio=int(anio),
+                df_ui_editado=df_ui,
                 db_path=db_path,
-                key_buffer=f"forecast_buffer_{cc}",
+                key_buffer=key_buffer,
             )
-            resultados.append({"cardcode": cc, **res})
 
-        # Resumen
-        oks = [r for r in resultados if r.get("ok")]
-        fails = [r for r in resultados if not r.get("ok")]
+            # Red de seguridad: retorno debe ser dict
+            if not isinstance(res, dict):
+                raise RuntimeError(
+                    "E.INTERNAL.001 retorno no estructurado de persistir_cambios_cliente"
+                )
 
-        print(f"[BATCH.SAVE.OK] clientes_ok={len(oks)} clientes_fail={len(fails)}")
-        return {
-            "ok": len(fails) == 0,
-            "oks": oks,
-            "fails": fails,
-            "resultados": resultados,
-        }
-    finally:
-        st.session_state["_saving_global"] = False
+            if res.get("ok"):
+                oks.append(
+                    {
+                        "cardcode": cc,
+                        "forecast_id": res.get("forecast_id"),
+                        "insertadas": (
+                            res.get("insertadas")
+                            if res.get("insertadas") is not None
+                            else res.get("rows", 0)
+                        ),
+                    }
+                )
+            else:
+                fails.append(
+                    {
+                        "cardcode": cc,
+                        "error": res.get("error") or "Error desconocido",
+                    }
+                )
+
+        except Exception as e:
+            print(f'[TX][CLIENT.FAIL] {{"cc": "{cc}", "error": "{str(e)}"}}')
+            fails.append({"cardcode": cc, "error": str(e)})
+
+    ok = len(fails) == 0
+    print(
+        f'[TX][BATCH.END] {{"ok": {str(ok).lower()}, "oks": {len(oks)}, "fails": {len(fails)}}}'
+    )
+    return {"ok": ok, "oks": oks, "fails": fails}
 
 
-# ---------- Fingerprint & cachés ligeros ----------
+# B_LOG001: Huella de base de datos para invalidar cachés
+# # ∂B_LOG001/∂B0
 def _db_fingerprint(
     db_path: str | Path | None = None,
 ) -> tuple[int, int, int, int, int, int]:
@@ -168,11 +199,15 @@ def _db_fingerprint(
         return (0, 0, 0, 0, 0, 0)
 
 
+# B_DBQ001: Caché de consulta de clientes por vendedor
+# # ∂B_DBQ001/∂B0
 @st.cache_data(show_spinner=False, ttl=600, max_entries=256)
 def _cached_obtener_clientes(slpcode: int, db_fp: tuple[int, int, int, int, int, int]):
     return obtener_clientes(slpcode)
 
 
+# B_DBQ002: Caché de forecast editable por cliente/año
+# # ∂B_DBQ002/∂B0
 @st.cache_data(show_spinner=False, ttl=600, max_entries=512)
 def _cached_obtener_forecast_editable(
     slpcode: int, cardcode: str, anio: int, db_fp: tuple[int, int, int, int, int, int]
@@ -234,7 +269,8 @@ def hash_df(df: pd.DataFrame) -> int:
     return int.from_bytes(h.digest(), "big")
 
 
-# 👇 ponlo en modulos/ventas.py (arriba del todo)
+# B_CTX002: Asegurar parámetros de URL canónicos para módulo ventas
+# # ∂B_CTX002/∂B0
 def ensure_url_reflects_ventas(slpcode: int | str | None) -> None:
     qp = st.query_params
     updates = {}
@@ -247,7 +283,8 @@ def ensure_url_reflects_ventas(slpcode: int | str | None) -> None:
         st.query_params.update(updates)
 
 
-# 👇 helper pequeño (opcional, pero útil)
+# B_CTX003: Extraer SlpCode desde parámetros de URL
+# # ∂B_CTX003/∂B0
 def _slp_from_url() -> int | None:
     v = st.query_params.get("vendedor") or st.query_params.get("slpcode")
     try:
@@ -259,6 +296,8 @@ def _slp_from_url() -> int | None:
 LAST_CLIENT_KEY = "_last_cliente_forecast"
 
 
+# B_HDF001: Canonización de DataFrame para hashing global estable
+# # ∂B_HDF001/∂B0
 def _canon_for_hash_global(df: pd.DataFrame) -> pd.DataFrame:
     df2 = df.copy()
     df2.columns = df2.columns.astype(str)
@@ -272,6 +311,8 @@ def _canon_for_hash_global(df: pd.DataFrame) -> pd.DataFrame:
     return df2.sort_index().sort_index(axis=1)
 
 
+# B_SYN001: Sincronizar cliente saliente antes del cambio en selector
+# # ∂B_SYN001/∂B0
 def _sync_prev_cliente_before_change():
     """Se invoca desde el callback del selectbox. Sincroniza el cliente saliente usando LAST_CLIENT_KEY."""
     prev = st.session_state.get(LAST_CLIENT_KEY)
@@ -348,6 +389,8 @@ def _sync_prev_cliente_before_change():
     print(f"[PRE-SWITCH] ✅ synced prev={prev} changed=True new_shape={df_sync.shape}")
 
 
+# B_SYN002: Callback de cambio de cliente con sincronización
+# # ∂B_SYN002/∂B0
 def _on_cliente_change():
     """
     Callback del selectbox de cliente.
@@ -358,7 +401,8 @@ def _on_cliente_change():
     # El valor seleccionado ya está en st.session_state['cliente_selectbox'] por el propio widget.
 
 
-# modulos/ventas.py
+# B_AUX001: Prefetch de forecast de clientes vecinos en caché
+# # ∂B_AUX001/∂B0
 def _prefetch_vecinos(
     slpcode: int,
     opciones: list[str],
@@ -398,7 +442,7 @@ def _prefetch_vecinos(
 # B_VFO001: Editor visual controlado y selección de cliente para forecast editable
 # # ∂B_VFO001/∂B0
 def vista_forecast(slpcode: int, _cardcode: str | None = None):
-    """Editor 4×12 (Cantidad/Precio) con cache, buffer de sesión y guardado batch."""
+    """Editor 4×12 (Cantidad/Precio) con cache, buffer de sesión y guardado batch (ruta fría unificada)."""
     # ──────────────────────────── Trazas iniciales ────────────────────────────
     print(
         f"[DEBUG-VISTA-INIT] Iniciando vista_forecast - slpcode: {slpcode}, cardcode_arg: {_cardcode}"
@@ -458,6 +502,8 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
 
     # Selección persistente
     KEY_SEL = "cliente_selectbox"
+    LAST_CLIENT_KEY = "_last_cliente_forecast"
+
     # columna nombre amigable (busca la primera que exista)
     _name_col = next(
         (c for c in ("Nombre", "CardName", "Cliente", "Name") if c in clientes.columns),
@@ -473,8 +519,8 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
     if KEY_SEL not in st.session_state or st.session_state[KEY_SEL] not in opciones:
         if isinstance(_cardcode, str) and _cardcode in opciones:
             st.session_state[KEY_SEL] = _cardcode
-        elif st.session_state.get("_last_cliente_forecast") in opciones:
-            st.session_state[KEY_SEL] = st.session_state["_last_cliente_forecast"]
+        elif st.session_state.get(LAST_CLIENT_KEY) in opciones:
+            st.session_state[KEY_SEL] = st.session_state[LAST_CLIENT_KEY]
         else:
             st.session_state[KEY_SEL] = opciones[0]
 
@@ -486,7 +532,7 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
             key=KEY_SEL,
             format_func=lambda x: f"{x} - {nombre_by_code.get(x, '')}",
             help="La selección persiste entre reruns.",
-            on_change=_on_cliente_change,  # tu callback
+            on_change=_on_cliente_change,  # tu callback robusto que sincroniza el cliente saliente
         )
 
         # Mostrar el último ForecastID visible (consultando DB)
@@ -500,7 +546,7 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
             print(f"[FID][warn] {e}")
 
     # Persistir selección actual para próximos reruns
-    st.session_state["_last_cliente_forecast"] = cardcode
+    st.session_state[LAST_CLIENT_KEY] = cardcode
 
     # Prefetch de vecinos (no debe romper si el helper no existe)
     try:
@@ -617,16 +663,12 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
     for mes in range(1, 13):
         col = f"{mes:02d}"
         column_config_forecast[col] = st.column_config.NumberColumn(
-            label=col, disabled=False  # ajusta si quieres bloquear meses
+            label=col, disabled=False
         )
 
-    # Alto en función del nº de filas, con un pequeño ajuste ("fudge") para evitar espacio extra
+    # Alto en función del nº de filas
     rows = len(df_mostrar)
-
-    ROW_PX = 36  # alto estimado por fila
-    HEADER_PX = 40  # cabecera/toolbar aproximada
-    FUDGE_PX = 12  # recorte para que no quede "una fila vacía"
-
+    ROW_PX, HEADER_PX, FUDGE_PX = 36, 40, 12
     height_px = max(120, HEADER_PX + rows * ROW_PX - FUDGE_PX)
 
     df_editado = st.data_editor(
@@ -637,7 +679,7 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
         height=height_px,
         column_order=columnas_ordenadas,
         column_config=column_config_forecast,
-        hide_index=False,  # o True si prefieres ocultar el índice
+        hide_index=False,
     )
 
     # Snapshot de UI
@@ -646,25 +688,19 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
     except Exception as _e:
         print(f"[UI-SNAPSHOT.WARN] {_e}")
 
-    # ──────────────────────────── Sincronización de cambios ────────────────────────────
+    # ──────────────────────────── Sincronización de cambios (solo cálculo) ────────────────────────────
     df_actualizado, hay_cambios = sincronizar_buffer_local(df_buffer, df_editado)
     print(f"[DEBUG-VISTA] Cliente actual: {cardcode}")
     print(f"[DEBUG-VISTA] hay_cambios_real: {hay_cambios}")
 
-    BASE_IDX = ["ItemCode", "TipoForecast", "Métrica", "OcrCode3"]
-
-    # Estado de cambios/hash/validación (sin F841)
-    prev_edit_hash = st.session_state.get(key_hash_edit)
+    # Estado de cambios/hash/validación (no añadimos a 'clientes_editados' aquí; lo hace el sellador)
     edit_hash = None
     valid_err = None
-    changed = False
 
     if hay_cambios:
         try:
             _df_for_edit_hash = _canon_for_hash(df_actualizado)
             edit_hash = hash_df(_df_for_edit_hash)
-            changed = prev_edit_hash != edit_hash
-            # persistir el hash para este cliente en la sesión
             st.session_state[key_hash_edit] = edit_hash
         except Exception as e:
             print(f"[ERROR-VISTA] No se pudo calcular edit_hash: {e}")
@@ -677,17 +713,14 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
     if valid_err:
         st.error(f"❌ Error de validación estructural: {valid_err}")
 
-    # ──────────────────────────── Botón Guardar ────────────────────────────
+    # ──────────────────────────── Botón Guardar (sellado en on_click) ────────────────────────────
     save_flag_key = f"_do_save_{cardcode}"
     saving_key = f"_saving_{cardcode}"
 
-    def _mark_do_save(flag_key=save_flag_key):
-        st.session_state[flag_key] = True
-
-    # Actualizar set de pendientes a partir del cambio real
-    pend_set = set(st.session_state.get("clientes_editados", set()))
-    if changed:
-        pend_set.add(cardcode)
+    # Conteo real de pendientes desde sesión (otros clientes + si ya hubo sellado)
+    pend_set = st.session_state.get("clientes_editados", set())
+    if not isinstance(pend_set, set):
+        pend_set = set(pend_set) if pend_set else set()
         st.session_state["clientes_editados"] = pend_set
     num_pend = len(pend_set)
 
@@ -696,17 +729,18 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
         if num_pend <= 1
         else f"💾 Guardar ({num_pend} clientes)"
     )
-
     st.button(
         btn_label,
         key=f"btn_save_{cardcode}",
         disabled=bool(valid_err)
         or st.session_state.get(saving_key, False)
         or st.session_state.get("_saving_global", False),
-        on_click=_mark_do_save,
+        on_click=lambda: _marcar_guardar(
+            cardcode
+        ),  # <-- SELLADO del activo + set de bandera
     )
 
-    # ──────────────────────────── Guardado batch ────────────────────────────
+    # ──────────────────────────── Guardado batch (ruta fría unificada) ────────────────────────────
     if st.session_state.get(save_flag_key):
         st.session_state.pop(save_flag_key, None)
 
@@ -725,28 +759,8 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
             print(
                 f"[DEBUG-SAVE] Iniciando proceso de guardado (batch) cliente_actual={cardcode}"
             )
-
-            df_to_save_actual = None
-            if changed:
-                base_idx_presentes = [
-                    c for c in BASE_IDX if c in df_actualizado.columns
-                ]
-                if not base_idx_presentes:
-                    raise ValueError(
-                        "No se encontraron columnas base para indexar (ItemCode/TipoForecast/Métrica/OcrCode3)."
-                    )
-                df_to_save_actual = (
-                    df_actualizado.set_index(base_idx_presentes)
-                    .sort_index()
-                    .reset_index()
-                )
-
             res_batch = _guardar_ediciones_en_lote(
-                slpcode=int(slpcode),
-                anio=int(anio),
-                db_path=DB_PATH_local,
-                current_cardcode=str(cardcode),
-                df_to_save_actual=df_to_save_actual,
+                slpcode=int(slpcode), anio=int(anio), db_path=DB_PATH_local
             )
 
             if not isinstance(res_batch, dict):
@@ -756,7 +770,10 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
             fails = res_batch.get("fails", [])
 
             if oks:
-                st.success("✅ Guardado OK: " + ", ".join([r["cardcode"] for r in oks]))
+                st.success(
+                    "✅ Guardado OK: "
+                    + ", ".join([r["cardcode"] for r in oks if "cardcode" in r])
+                )
             if fails:
                 for r in fails:
                     st.error(
@@ -836,3 +853,241 @@ def run():
         print(f"[RUN.ERROR] {cls}: {e}")
         st.error(f"No se pudo cargar la vista de ventas: {e}")
         st.stop()
+
+
+def _marcar_guardar(cardcode: str) -> None:
+    """
+    SELLADOR del cliente activo antes del batch.
+    - Fuente UI: ui_snapshot > mirror > buffer
+    - Validación suave (no aborta)
+    - Sincroniza UI→buffer; si hay cambios válidos, sella en session[key_buffer] y marca pendiente
+    - Señaliza guardado para este cliente
+    Prints (terminal):
+      [VENTAS][FLUSH.ACTIVE], [VENTAS][BATCH.MARK], y [EDITOR][VALID] si valida en falso.
+    """
+    t0 = time.time()
+    cc = str(cardcode)
+
+    key_buffer = f"forecast_buffer_{cc}"
+    key_mirror = f"{key_buffer}_editado"
+    ui_snapshot = f"{key_mirror}__ui_snapshot"
+    key_hash_edit = f"{key_buffer}_edithash"
+    save_flag_key = f"_do_save_{cc}"
+
+    # Asegurar set de pendientes
+    pend = st.session_state.get("clientes_editados", set())
+    if not isinstance(pend, set):
+        pend = set(pend) if pend else set()
+    st.session_state["clientes_editados"] = pend
+
+    # Fuente UI
+    src_name = None
+    df_ui = None
+    if ui_snapshot in st.session_state and isinstance(
+        st.session_state[ui_snapshot], pd.DataFrame
+    ):
+        df_ui = st.session_state[ui_snapshot]
+        src_name = "ui_snapshot"
+    elif key_mirror in st.session_state and isinstance(
+        st.session_state[key_mirror], pd.DataFrame
+    ):
+        df_ui = st.session_state[key_mirror]
+        src_name = "mirror"
+    elif key_buffer in st.session_state and isinstance(
+        st.session_state[key_buffer], pd.DataFrame
+    ):
+        df_ui = st.session_state[key_buffer]
+        src_name = "buffer"
+    else:
+        print(
+            "[VENTAS][FLUSH.ACTIVE] "
+            + json.dumps(
+                {
+                    "cc": cc,
+                    "changed": False,
+                    "rows_ui": 0,
+                    "rows_buffer": 0,
+                    "hash_edit": None,
+                    "source": "absent",
+                    "elapsed_ms": int((time.time() - t0) * 1000),
+                    "warn": "E.STATE.001 no hay buffer/mirror/ui_snapshot",
+                },
+                ensure_ascii=False,
+            )
+        )
+        st.session_state[save_flag_key] = True
+        st.session_state["_sealed_pending_batch"] = True
+        return
+
+    # Validación suave
+    valid_ok = True
+    try:
+        validar_forecast_dataframe(df_ui)
+    except Exception as e:
+        valid_ok = False
+        print(
+            "[EDITOR][VALID] "
+            + json.dumps({"cc": cc, "ok": False, "error": str(e)}, ensure_ascii=False)
+        )
+
+    # Base para sincronizar
+    df_base = st.session_state.get(key_buffer, df_ui)
+
+    # Sync UI→buffer
+    try:
+        df_upd, changed = sincronizar_buffer_local(df_base, df_ui)  # llamadas directas
+    except Exception as e:
+        print(
+            "[VENTAS][FLUSH.ACTIVE] "
+            + json.dumps(
+                {
+                    "cc": cc,
+                    "changed": False,
+                    "rows_ui": int(getattr(df_ui, "shape", (0, 0))[0]),
+                    "rows_buffer": int(getattr(df_base, "shape", (0, 0))[0]),
+                    "hash_edit": None,
+                    "source": src_name,
+                    "elapsed_ms": int((time.time() - t0) * 1000),
+                    "error": f"E.STATE.001 sync_fail: {e}",
+                },
+                ensure_ascii=False,
+            )
+        )
+        st.session_state[save_flag_key] = True
+        st.session_state["_sealed_pending_batch"] = True
+        return
+
+    rows_ui = int(getattr(df_ui, "shape", (0, 0))[0])
+    rows_buf = int(getattr(df_upd, "shape", (0, 0))[0])
+
+    # Hash seguro local (sin dependencias externas)
+    # B_HDF004: Hash seguro de DataFrame numérico para ediciones locales
+    # # ∂B_HDF004/∂B0
+    def _safe_hash_df(df: pd.DataFrame):
+        try:
+            canon = df.copy()
+            for c in canon.columns:
+                if pd.api.types.is_numeric_dtype(canon[c]):
+                    canon[c] = canon[c].fillna(0)
+            payload = {
+                "index": (
+                    canon.index.tolist()
+                    if canon.index.nlevels == 1
+                    else list(map(tuple, canon.index))
+                ),
+                "columns": canon.columns.tolist(),
+                "values": canon.select_dtypes(include="number").to_numpy().tolist(),
+            }
+            return hash(json.dumps(payload, sort_keys=True))
+        except Exception:
+            return None
+
+    if changed and valid_ok:
+        st.session_state[key_buffer] = df_upd
+        st.session_state[key_hash_edit] = _safe_hash_df(df_upd)
+        pend.add(cc)
+
+    # Señales
+    st.session_state[save_flag_key] = True
+    st.session_state["_sealed_pending_batch"] = True
+
+    print(
+        "[VENTAS][FLUSH.ACTIVE] "
+        + json.dumps(
+            {
+                "cc": cc,
+                "changed": bool(changed),
+                "rows_ui": rows_ui,
+                "rows_buffer": rows_buf,
+                "hash_edit": st.session_state.get(key_hash_edit),
+                "source": src_name,
+                "elapsed_ms": int((time.time() - t0) * 1000),
+            },
+            ensure_ascii=False,
+        )
+    )
+    print(
+        "[VENTAS][BATCH.MARK] "
+        + json.dumps(
+            {"pendientes": len(st.session_state.get("clientes_editados", set()))},
+            ensure_ascii=False,
+        )
+    )
+
+
+def _rebuild_buffer_from_snapshot(cardcode: str) -> bool:
+    """
+    Intenta reconstruir forecast_buffer_{cc} desde ui_snapshot o mirror.
+    Retorna True si logra setear y validar el buffer (incluye hash_edit).
+    Prints:
+      [STATE][REBUILD.OK] / [STATE][REBUILD.FAIL]
+    """
+    cc = str(cardcode)
+    key_buffer = f"forecast_buffer_{cc}"
+    key_mirror = f"{key_buffer}_editado"
+    ui_snapshot = f"{key_mirror}__ui_snapshot"
+    key_hash_edit = f"{key_buffer}_edithash"
+
+    src = None
+    src_name = None
+
+    if ui_snapshot in st.session_state and isinstance(
+        st.session_state[ui_snapshot], pd.DataFrame
+    ):
+        src = st.session_state[ui_snapshot]
+        src_name = "ui_snapshot"
+    elif key_mirror in st.session_state and isinstance(
+        st.session_state[key_mirror], pd.DataFrame
+    ):
+        src = st.session_state[key_mirror]
+        src_name = "mirror"
+    else:
+        print(
+            "[STATE][REBUILD.FAIL] "
+            + json.dumps({"cc": cc, "error": "absent_state"}, ensure_ascii=False)
+        )
+        return False
+
+    try:
+        validar_forecast_dataframe(src)
+        base = st.session_state.get(key_buffer, src)
+        df_upd, _ = sincronizar_buffer_local(base, src)
+        st.session_state[key_buffer] = df_upd
+
+        # hash simple como en _marcar_guardar
+        try:
+            canon = df_upd.copy()
+            for c in canon.columns:
+                if pd.api.types.is_numeric_dtype(canon[c]):
+                    canon[c] = canon[c].fillna(0)
+            payload = {
+                "index": (
+                    canon.index.tolist()
+                    if canon.index.nlevels == 1
+                    else list(map(tuple, canon.index))
+                ),
+                "columns": canon.columns.tolist(),
+                "values": canon.select_dtypes(include="number").to_numpy().tolist(),
+            }
+            st.session_state[key_hash_edit] = hash(json.dumps(payload, sort_keys=True))
+        except Exception:
+            st.session_state[key_hash_edit] = None
+
+        print(
+            "[STATE][REBUILD.OK] "
+            + json.dumps(
+                {
+                    "cc": cc,
+                    "source": src_name,
+                    "rows": int(getattr(df_upd, "shape", (0, 0))[0]),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return True
+    except Exception as e:
+        print(
+            "[STATE][REBUILD.FAIL] "
+            + json.dumps({"cc": cc, "error": str(e)}, ensure_ascii=False)
+        )
+        return False

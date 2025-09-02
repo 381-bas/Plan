@@ -15,12 +15,14 @@ from typing import Any, Callable, List, Tuple, Iterator
 import os
 from typing import Optional
 
+from contextlib import closing
+
 OperationalError = sqlite3.OperationalError
 DatabaseError = sqlite3.DatabaseError
 
-# ---------------------------------------------------------------------------
-# 📌 Configuración global
-# ---------------------------------------------------------------------------
+
+# B_CTX001: Configuración global de base de datos y timeouts
+# # ∂B_CTX001/∂B0
 DB_PATH: str = (
     "C:/Users/qmkbantiman/OneDrive - QMK SPA/Informacion/quickpilot/Plan_Final_Final_Final.db"
 )
@@ -29,9 +31,8 @@ DB_PATH = os.getenv("DB_PATH", DB_PATH)  # usa el ya definido en tu módulo
 BUSY_MS = 30_000
 
 
-# ---------------------------------------------------------------------------
-# 🔑 Núcleo limpio (lectura / escritura)
-# ---------------------------------------------------------------------------
+# B_DBQ001: SELECT flexible compatible (legacy y moderno)
+# # ∂B_DBQ001/∂B0
 def run_query(sql: str, *args: Any, **kwargs: Any) -> pd.DataFrame:  # noqa: C901
     """
     Ejecuta un SELECT y devuelve un DataFrame.
@@ -84,6 +85,8 @@ def run_query(sql: str, *args: Any, **kwargs: Any) -> pd.DataFrame:  # noqa: C90
         return pd.read_sql_query(sql, conn, params=params)
 
 
+# B_INS001: Escrituras genéricas (execute/executemany) con transacción
+# # ∂B_INS001/∂B0
 def _execute_write(
     sql: str,
     params: Tuple[Any, ...] | List[Tuple[Any, ...]] | None = None,
@@ -97,11 +100,8 @@ def _execute_write(
         (conn.executemany if many else conn.execute)(sql, params)  # type: ignore[arg-type]
 
 
-# ---------------------------------------------------------------------------
-# 🔄 Decorador de reintento (bloqueo)
-# ---------------------------------------------------------------------------
-
-
+# B_AUX001: Decorador de reintento ante 'database is locked'
+# # ∂B_AUX001/∂B0
 def retry_sql_locked(
     max_attempts: int = 5, delay: float = 0.4
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -127,8 +127,8 @@ def retry_sql_locked(
     return decorator
 
 
-# utils/db.py  (o el módulo donde se declaren los wrappers)
-# ──────────────────────────────────────────────────────────
+# B_DBQ002: Wrappers de SELECT compatibles con run_query
+# # ∂B_DBQ002/∂B0
 def _run_forecast_select(
     sql: str, params: tuple | None = None, db_path: str = DB_PATH
 ) -> pd.DataFrame:
@@ -136,13 +136,6 @@ def _run_forecast_select(
     return run_query(sql, db_path, params=params or ())
 
 
-# Idéntico patrón para _run_admin_select, _run_product_select, etc.
-
-
-# ---------------------------------------------------------------------------
-# 🧩 Wrappers por flujo (alias → núcleo)
-#   Conservan nombres históricos para cero breaking‑changes
-# ---------------------------------------------------------------------------
 def _run_admin_select(sql, params=None):
     return run_query(sql, params=params or ())
 
@@ -179,7 +172,8 @@ def _run_home_select(sql, params=None):
     return run_query(sql, params=params or ())
 
 
-# -- escrituras --
+# B_INS005: Aliases de escrituras para compatibilidad
+# # ∂B_INS005/∂B0
 _run_admin_insert = _execute_write
 _run_forecast_write = _execute_write
 _run_product_insert = _execute_write
@@ -187,9 +181,8 @@ _run_client_insert = _execute_write
 _run_vendor_insert = _execute_write
 
 
-# ---------------------------------------------------------------------------
-# 🏷️  Wrappers con lógica dedicada
-# ---------------------------------------------------------------------------
+# B_LOG001: Inserción de DataFrame en tabla de logs (to_sql)
+# # ∂B_LOG001/∂B0
 def _run_log_to_sql(df: pd.DataFrame, table: str, *, db_path: str = DB_PATH) -> None:
     if df.empty:
         return
@@ -197,6 +190,8 @@ def _run_log_to_sql(df: pd.DataFrame, table: str, *, db_path: str = DB_PATH) -> 
         df.to_sql(table, conn, if_exists="append", index=False)
 
 
+# B_INS002: INSERT con retorno de lastrowid para Forecast
+# # ∂B_INS002/∂B0
 def _run_forecast_insert_get_id(
     sql: str, params: Tuple[Any, ...], *, timeout: int = 15
 ) -> int:
@@ -206,6 +201,8 @@ def _run_forecast_insert_get_id(
         return int(cursor.lastrowid)
 
 
+# B_INS003: Duplicación transaccional de forecast por reasignación
+# # ∂B_INS003/∂B0
 def _duplicar_forecast_reasignacion(
     slp_origen: int,
     slp_destino: int,
@@ -255,10 +252,14 @@ def _duplicar_forecast_reasignacion(
 
 
 # Registro de inicialización por base de datos (evita ejecutar PRAGMAs repetidamente)
+# B_CTX007: Registro de inicialización WAL por base de datos
+# # ∂B_CTX007/∂B0
 __WAL_INIT = {}
 __WAL_LOCK = Lock()
 
 
+# B_CTX002: Inicialización única de WAL y PRAGMAs por base de datos
+# # ∂B_CTX002/∂B0
 def _init_wal_once(db_path: str) -> None:
     """
     Inicializa la base en modo WAL y PRAGMAs globales una sola vez por `db_path`.
@@ -290,6 +291,8 @@ def _init_wal_once(db_path: str) -> None:
             conn.close()
 
 
+# B_TXN001: Context manager de transacciones (BEGIN/COMMIT/ROLLBACK)
+# # ∂B_TXN001/∂B0
 @contextmanager
 def tx(
     db_path: str = DB_PATH, *, immediate: bool = True, timeout: int = 30
@@ -320,10 +323,14 @@ def tx(
         conn.close()
 
 
+# B_DBQ003: Select genérico con db_path explícito
+# # ∂B_DBQ003/∂B0
 def _read_sql(db_path: str, sql: str, params: tuple = ()) -> pd.DataFrame:
     return run_query(sql, db_path, params=params)
 
 
+# B_INS004: Mantenimiento — deduplicación por clave real en Forecast_Detalle
+# # ∂B_INS004/∂B0
 def deduplicar_detalle_por_clave(conn: sqlite3.Connection) -> int:
     """
     Limpia duplicados en Forecast_Detalle usando la clave REAL de BD:
@@ -394,7 +401,8 @@ def deduplicar_detalle_por_clave(conn: sqlite3.Connection) -> int:
     return total_del
 
 
-# utils/db.py — NUEVO
+# B_CTX003: Conexión con PRAGMAs consistentes (sin iniciar BEGIN)
+# # ∂B_CTX003/∂B0
 def _get_conn(db_path: str = DB_PATH, *, timeout: int = 30) -> sqlite3.Connection:
     """Conexión con PRAGMAs consistentes (sin iniciar BEGIN)."""
     _init_wal_once(db_path)
@@ -405,6 +413,8 @@ def _get_conn(db_path: str = DB_PATH, *, timeout: int = 30) -> sqlite3.Connectio
     return conn
 
 
+# B_LOG002: Escritura de logs con reintento y manejo de many
+# # ∂B_LOG002/∂B0
 @retry_sql_locked()
 def _run_log_write(
     sql: str,
@@ -432,6 +442,8 @@ def _run_log_write(
             conn.execute(sql, params)  # type: ignore[arg-type]
 
 
+# B_CTX004: Conexión cruda (compat) con inicialización de WAL/PRAGMAs
+# # ∂B_CTX004/∂B0
 def connect(
     db_path: str = DB_PATH,
     *,
@@ -448,6 +460,8 @@ def connect(
     )
 
 
+# B_CTX005: Utilidad de rango de año (YYYY-01-01, YYYY+1-01-01)
+# # ∂B_CTX005/∂B0
 def year_range(anio: Optional[int]) -> Tuple[Optional[str], Optional[str]]:
     """
     Devuelve (ini, fin) como 'YYYY-01-01' y 'YYYY+1-01-01'.
@@ -462,6 +476,8 @@ def year_range(anio: Optional[int]) -> Tuple[Optional[str], Optional[str]]:
     return f"{y:04d}-01-01", f"{y+1:04d}-01-01"
 
 
+# B_DBQ004: Inyección de filtro de año en SQL base
+# # ∂B_DBQ004/∂B0
 def add_year_filter(sql_base: str, anio: Optional[int], *, col: str = "FechEntr"):
     """
     Devuelve (sql, params_extra) agregando AND … >= ? AND … < ? si hay año válido.
@@ -472,6 +488,8 @@ def add_year_filter(sql_base: str, anio: Optional[int], *, col: str = "FechEntr"
     return f"{sql_base} AND {col} >= ? AND {col} < ?", (ini, fin)
 
 
+# B_DBQ005: Consulta del MAX(ForecastID) visible por rango de año
+# # ∂B_DBQ005/∂B0
 def _forecast_id_visible(
     slpcode: int,
     cardcode: str,
@@ -510,9 +528,31 @@ def _forecast_id_visible(
         return None
 
 
+def _connect(db_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def query_scalar(db_path: str, sql: str, params=(), default=None):
+    with closing(_connect(db_path)) as con, closing(con.cursor()) as cur:
+        cur.execute(sql, params)
+        row = cur.fetchone()
+        return row[0] if row and row[0] is not None else default
+
+
+def execute(db_path: str, sql: str, params=()) -> int:
+    with closing(_connect(db_path)) as con, closing(con.cursor()) as cur:
+        cur.execute(sql, params)
+        con.commit()
+        return int(cur.lastrowid)
+
+
 # ---------------------------------------------------------------------------
 # ✨ API pública
 # ---------------------------------------------------------------------------
+# B_CTX006: Exportación de API pública del módulo
+# # ∂B_CTX006/∂B0
 __all__ = [
     # núcleo
     "run_query",
