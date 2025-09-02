@@ -239,6 +239,8 @@ def run():
             total_anterior = df_cliente["Venta Mes Anterior"].sum()
             total_diferencia = total_actual - total_anterior
 
+            # B_AUX001: Formateo compacto de miles para labels y títulos
+            # # ∂B_AUX001/∂B0
             def formato_miles(valor):
                 return (
                     f"{round(valor / 1000, 1):,.1f}".replace(",", "X")

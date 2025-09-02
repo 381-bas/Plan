@@ -12,8 +12,8 @@ from utils.db import run_query, DB_PATH
 # ───────────────────────────────────────────────────────────────────────────
 # 👓  Punto de entrada UI
 # ───────────────────────────────────────────────────────────────────────────
-
-
+# B_VF006: Render principal de la pestaña Facturas (OINV × INV1)
+# # ∂B_VF006/∂B0
 def mostrar_facturas() -> None:
     """Render principal de la pestaña *Facturas* (OINV × INV1)."""
 
@@ -41,7 +41,8 @@ def mostrar_facturas() -> None:
 # ───────────────────────────────────────────────────────────────────────────
 
 
-# B_VF001
+# B_VF001: Normalización robusta de DocDate a tipo date
+# # ∂B_VF001/∂B0
 def _parse_docdate(col: pd.Series) -> pd.Series:
     """Normaliza DocDate priorizando 'YYYY-MM-DD' y con fallback day-first."""
     s = pd.to_datetime(col, format="%Y-%m-%d", errors="coerce")
@@ -52,6 +53,8 @@ def _parse_docdate(col: pd.Series) -> pd.Series:
     return s.dt.date  # devuelve date (sin hora)
 
 
+# B_VF002: Consulta base de facturas con MesFactura derivado
+# # ∂B_VF002/∂B0
 def obtener_facturas_base(
     *,
     db_path: str = DB_PATH,
@@ -110,9 +113,9 @@ def obtener_facturas_base(
 # 🎛️  Filtros UI (Mes, Cliente)
 # ───────────────────────────────────────────────────────────────────────────
 
-# B_VF002
 
-
+# B_VF003: Aplicación de filtros UI (MesFactura, Cliente)
+# # ∂B_VF003/∂B0
 def aplicar_filtros(df: pd.DataFrame) -> pd.DataFrame:
     st.subheader("Filtros")
 
@@ -151,9 +154,9 @@ def aplicar_filtros(df: pd.DataFrame) -> pd.DataFrame:
 # 📊  KPIs, Diagnóstico y Vista final
 # ───────────────────────────────────────────────────────────────────────────
 
-# B_VF003
 
-
+# B_VF004: Cálculo de KPIs descriptivos de facturación
+# # ∂B_VF004/∂B0
 def calcular_kpis(df: pd.DataFrame) -> None:
     st.markdown("### KPIs")
     col1, col2, col3 = st.columns(3)
@@ -162,16 +165,14 @@ def calcular_kpis(df: pd.DataFrame) -> None:
     col3.metric("Docs Únicos", f"{df['DocEntry'].nunique()}")
 
 
-# B_VF004
-
-
+# B_VF005: Diagnóstico semántico de consistencia (placeholder)
+# # ∂B_VF005/∂B0
 def diagnostico_semantico(df: pd.DataFrame) -> None:
     pass  # Comentado temporalmente por decisión operativa
 
 
-# B_VF005
-
-
+# B_VF007: Render de vista detallada de facturas
+# # ∂B_VF007/∂B0
 def renderizar_vista(df: pd.DataFrame) -> None:
     st.subheader("Vista Detallada de Facturas")
     st.dataframe(df, use_container_width=True)

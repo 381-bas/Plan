@@ -9,9 +9,8 @@ from core.historico import _serie_mensual_hist
 from utils.db import run_query, DB_PATH
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Catálogos base (desde tabla Stock)
-# ──────────────────────────────────────────────────────────────────────────────
+# B_DBQ020: Catálogo de ítems desde Stock (cacheado)
+# # ∂B_DBQ020/∂B0
 @st.cache_data(show_spinner=False)
 def _obtener_items_stock() -> pd.DataFrame:
     sql = """
@@ -23,6 +22,8 @@ def _obtener_items_stock() -> pd.DataFrame:
     return df if not df.empty else pd.DataFrame(columns=["ItemCode", "ItemName"])
 
 
+# B_DBQ021: Catálogo de bodegas desde Stock (cacheado)
+# # ∂B_DBQ021/∂B0
 @st.cache_data(show_spinner=False)
 def _obtener_bodegas_stock() -> pd.DataFrame:
     sql = """
@@ -34,6 +35,8 @@ def _obtener_bodegas_stock() -> pd.DataFrame:
     return df if not df.empty else pd.DataFrame(columns=["WhsCode", "WhsName"])
 
 
+# B_DBQ022: Catálogo de grupos (ItmsGrpNam) desde Stock (cacheado)
+# # ∂B_DBQ022/∂B0
 @st.cache_data(show_spinner=False)
 def _obtener_grupos() -> pd.DataFrame:
     sql = """
@@ -46,6 +49,8 @@ def _obtener_grupos() -> pd.DataFrame:
     return df if not df.empty else pd.DataFrame(columns=["ItmsGrpNam"])
 
 
+# B_DBQ023: Bodegas disponibles para un ítem (cacheado)
+# # ∂B_DBQ023/∂B0
 @st.cache_data(show_spinner=False)
 def _bodegas_para_item(itemcode: str) -> pd.DataFrame:
     sql = """
@@ -58,6 +63,8 @@ def _bodegas_para_item(itemcode: str) -> pd.DataFrame:
     return df if not df.empty else pd.DataFrame(columns=["WhsCode", "WhsName"])
 
 
+# B_DBQ024: Ítems disponibles para una bodega (cacheado)
+# # ∂B_DBQ024/∂B0
 @st.cache_data(show_spinner=False)
 def _items_para_bodega(whscode: str) -> pd.DataFrame:
     sql = """
@@ -70,6 +77,8 @@ def _items_para_bodega(whscode: str) -> pd.DataFrame:
     return df if not df.empty else pd.DataFrame(columns=["ItemCode", "ItemName"])
 
 
+# B_DBQ025: Lotes disponibles filtrados por ítem y bodega (cacheado)
+# # ∂B_DBQ025/∂B0
 @st.cache_data(show_spinner=False)
 def _lotes_disponibles(itemcode: Optional[str], whscode: Optional[str]) -> pd.DataFrame:
     sql = """
@@ -89,9 +98,8 @@ def _lotes_disponibles(itemcode: Optional[str], whscode: Optional[str]) -> pd.Da
     return df if not df.empty else pd.DataFrame(columns=["Lote"])
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Consulta base
-# ──────────────────────────────────────────────────────────────────────────────
+# B_DBQ026: Constructor de SQL base para Stock con filtros opcionales
+# # ∂B_DBQ026/∂B0
 def _build_sql(
     itemcode: Optional[str],
     whscode: Optional[str],
@@ -128,6 +136,8 @@ def _build_sql(
     return sql, tuple(params)
 
 
+# B_DBQ027: Consulta base de Stock con derivados y orden amigable
+# # ∂B_DBQ027/∂B0
 def _obtener_base(
     itemcode: Optional[str],
     whscode: Optional[str],
@@ -189,6 +199,8 @@ MESES_ES = {
 }
 
 
+# B_HDF020: Etiquetas centrales por año para línea temporal
+# # ∂B_HDF020/∂B0
 def _labels_de_anio_tiempo(df_mensual: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for y, sub in df_mensual.groupby("Year"):
@@ -200,6 +212,8 @@ def _labels_de_anio_tiempo(df_mensual: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# B_UIX020: Gráfico de barras mensual con etiquetas y orden nominal
+# # ∂B_UIX020/∂B0
 def _chart_barras_mensual(
     df_m: pd.DataFrame, y_field: str, y_title: str, chart_title: str
 ):
@@ -254,9 +268,8 @@ def _chart_barras_mensual(
     ).resolve_scale(x="shared")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Vista principal
-# ──────────────────────────────────────────────────────────────────────────────
+# B_UIX021: Vista de stock con filtros, tabla y gráficos Altair
+# # ∂B_UIX021/∂B0
 def vista_stock(
     slpcode: int, _unused=None  # slpcode intencionalmente ignorado
 ) -> None:

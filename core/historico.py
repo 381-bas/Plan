@@ -9,9 +9,8 @@ import altair as alt
 from utils.db import run_query, DB_PATH
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Catálogos base
-# ──────────────────────────────────────────────────────────────────────────────
+# B_DBQ010: Catálogo de clientes válidos (cacheado)
+# # ∂B_DBQ010/∂B0
 @st.cache_data(show_spinner=False)
 def _obtener_clientes() -> pd.DataFrame:
     sql = """
@@ -25,6 +24,8 @@ def _obtener_clientes() -> pd.DataFrame:
     return df if not df.empty else pd.DataFrame(columns=["CardCode", "CardName"])
 
 
+# B_DBQ011: Catálogo de ítems válidos (cacheado)
+# # ∂B_DBQ011/∂B0
 @st.cache_data(show_spinner=False)
 def _obtener_items() -> pd.DataFrame:
     sql = """
@@ -37,7 +38,8 @@ def _obtener_items() -> pd.DataFrame:
     return df if not df.empty else pd.DataFrame(columns=["ItemCode", "ItemName"])
 
 
-# Dependencias: opciones condicionadas por la selección del otro filtro
+# B_DBQ012: Ítems disponibles para un cliente (cacheado)
+# # ∂B_DBQ012/∂B0
 @st.cache_data(show_spinner=False)
 def _items_para_cliente(cardcode: str) -> pd.DataFrame:
     sql = """
@@ -52,6 +54,8 @@ def _items_para_cliente(cardcode: str) -> pd.DataFrame:
     return df if not df.empty else pd.DataFrame(columns=["ItemCode", "ItemName"])
 
 
+# B_DBQ013: Clientes con ventas para un ítem (cacheado)
+# # ∂B_DBQ013/∂B0
 @st.cache_data(show_spinner=False)
 def _clientes_para_item(itemcode: str) -> pd.DataFrame:
     sql = """
@@ -65,9 +69,8 @@ def _clientes_para_item(itemcode: str) -> pd.DataFrame:
     return df if not df.empty else pd.DataFrame(columns=["CardCode", "CardName"])
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Consulta base OINV × INV1 (única fecha: DocDueDate)
-# ──────────────────────────────────────────────────────────────────────────────
+# B_DBQ014: Constructor de SQL base (OINV × INV1) con filtros opcionales
+# # ∂B_DBQ014/∂B0
 def _build_sql(cardcode: Optional[str], itemcode: Optional[str]) -> Tuple[str, Tuple]:
     sql = """
     SELECT
@@ -94,6 +97,8 @@ def _build_sql(cardcode: Optional[str], itemcode: Optional[str]) -> Tuple[str, T
     return sql, tuple(params)
 
 
+# B_DBQ015: Consulta base enriquecida (ItemName, moneda, columnas finales)
+# # ∂B_DBQ015/∂B0
 def _obtener_base(cardcode: Optional[str], itemcode: Optional[str]) -> pd.DataFrame:
     sql, params = _build_sql(cardcode, itemcode)
     df = run_query(sql, DB_PATH, params)
@@ -144,6 +149,8 @@ MESES_ES = {
 }
 
 
+# B_HDF010: Rango mensual completo a partir de fechas de documento
+# # ∂B_HDF010/∂B0
 def _rango_mensual(df_dates: pd.Series) -> pd.DatetimeIndex:
     fechas = pd.to_datetime(df_dates, errors="coerce").dropna()
     if fechas.empty:
@@ -164,6 +171,8 @@ def _rango_mensual(df_dates: pd.Series) -> pd.DatetimeIndex:
     return pd.date_range(start, end, freq="MS")
 
 
+# B_HDF011: Serie mensual agregada con etiquetas y orden nominal
+# # ∂B_HDF011/∂B0
 def _serie_mensual_hist(df: pd.DataFrame, *args: str) -> pd.DataFrame:
     """
     Uso compatible:
@@ -218,9 +227,8 @@ def _serie_mensual_hist(df: pd.DataFrame, *args: str) -> pd.DataFrame:
     return out
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Vista UI – Filtros dependientes (en una fila) + tabla + gráficos
-# ──────────────────────────────────────────────────────────────────────────────
+# B_UIX001: Vista histórica de ventas con filtros dependientes y gráficos Altair
+# # ∂B_UIX001/∂B0
 def vista_historico(
     slpcode: int, _unused=None
 ) -> None:  # slpcode intencionalmente ignorado
