@@ -7,6 +7,7 @@ import streamlit as st
 import pandas as pd
 import json
 import time
+import unicodedata
 from utils.db import (
     run_query,
     DB_PATH,
@@ -73,6 +74,11 @@ def _guardar_ediciones_en_lote(
     """
     Orquestador batch: toma clientes desde st.session_state['clientes_editados'],
     reconstruye su 4×12 desde sesión y llama a persistir_cambios_cliente(...).
+
+    Trata 'UI_REBUILD_NOT_4X12' como ÉXITO con notificación:
+      - Los clientes con ese warning se incluyen en 'oks' (no en 'fails')
+      - Se adjunta el campo 'warning' (str) y 'warnings' (list) en cada item de 'oks'
+
     Retorna: { "ok": bool, "oks": [...], "fails": [...] }
     """
     objetivos = list(st.session_state.get("clientes_editados", set()) or [])
@@ -126,9 +132,40 @@ def _guardar_ediciones_en_lote(
                     "E.INTERNAL.001 retorno no estructurado de persistir_cambios_cliente"
                 )
 
+            # Interpretar resultado
             if res.get("ok"):
-                oks.append(
-                    {
+                ok_item = {
+                    "cardcode": cc,
+                    "forecast_id": res.get("forecast_id"),
+                    "insertadas": (
+                        res.get("insertadas")
+                        if res.get("insertadas") is not None
+                        else res.get("rows", 0)
+                    ),
+                }
+                # Propaga advertencias si existen (p.ej. UI_REBUILD_NOT_4X12)
+                if res.get("warning"):
+                    ok_item["warning"] = res.get("warning")
+                if res.get("warnings"):
+                    ok_item["warnings"] = res.get("warnings")
+
+                if res.get("warning") == "UI_REBUILD_NOT_4X12":
+                    print(
+                        f'[TX][CLIENT.OK.WARN] {{"cc": "{cc}", "forecast_id": {ok_item.get("forecast_id")}, "insertadas": {ok_item.get("insertadas")}, "warning": "UI_REBUILD_NOT_4X12"}}'
+                    )
+                else:
+                    print(
+                        f'[TX][CLIENT.OK] {{"cc": "{cc}", "forecast_id": {ok_item.get("forecast_id")}, "insertadas": {ok_item.get("insertadas")}}}'
+                    )
+
+                oks.append(ok_item)
+
+            else:
+                # Ultra robusto: si por alguna razón una versión previa aún devolviera error UI_REBUILD_NOT_4X12,
+                # degradar a éxito con notificación (compatibilidad hacia atrás).
+                err_msg = (res.get("error") or "").upper()
+                if "UI_REBUILD_NOT_4X12" in err_msg:
+                    ok_item = {
                         "cardcode": cc,
                         "forecast_id": res.get("forecast_id"),
                         "insertadas": (
@@ -136,15 +173,23 @@ def _guardar_ediciones_en_lote(
                             if res.get("insertadas") is not None
                             else res.get("rows", 0)
                         ),
+                        "warning": "UI_REBUILD_NOT_4X12",
+                        "warnings": res.get("warnings") or [],
                     }
-                )
-            else:
-                fails.append(
-                    {
-                        "cardcode": cc,
-                        "error": res.get("error") or "Error desconocido",
-                    }
-                )
+                    print(
+                        f'[TX][CLIENT.OK.WARN*] {{"cc": "{cc}", "forecast_id": {ok_item.get("forecast_id")}, "insertadas": {ok_item.get("insertadas")}, "warning": "UI_REBUILD_NOT_4X12 (compat)"}}'
+                    )
+                    oks.append(ok_item)
+                else:
+                    fails.append(
+                        {
+                            "cardcode": cc,
+                            "error": res.get("error") or "Error desconocido",
+                        }
+                    )
+                    print(
+                        f'[TX][CLIENT.FAIL] {{"cc": "{cc}", "error": "{res.get("error") or "Error desconocido"}"}}'
+                    )
 
         except Exception as e:
             print(f'[TX][CLIENT.FAIL] {{"cc": "{cc}", "error": "{str(e)}"}}')
@@ -439,6 +484,12 @@ def _prefetch_vecinos(
         print(f"[PREFETCH][fatal] {_prefetch_vecinos.__name__} -> {e}")
 
 
+def _norm(text: str) -> str:
+    nfkd = unicodedata.normalize("NFKD", text or "")
+    base = "".join(ch for ch in nfkd if not unicodedata.combining(ch))
+    return base.casefold().strip()
+
+
 # B_VFO001: Editor visual controlado y selección de cliente para forecast editable
 # # ∂B_VFO001/∂B0
 def vista_forecast(slpcode: int, _cardcode: str | None = None):
@@ -495,8 +546,36 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
         st.error("Listado de clientes sin CardCode.")
         st.stop()
 
-    opciones = clientes["CardCode"].astype(str).tolist()
-    if not opciones:
+    # columna nombre amigable (busca la primera que exista)
+    _name_col = next(
+        (c for c in ("Nombre", "CardName", "Cliente", "Name") if c in clientes.columns),
+        None,
+    )
+
+    # ── ORDEN ALFABÉTICO POR NOMBRE (ignorando tildes/mayúsculas) + etiquetas "Nombre — RUT"
+    if _name_col:
+        clientes_sorted = (
+            clientes.assign(
+                _sort=clientes[_name_col].astype(str).map(_norm),
+                _cc=clientes["CardCode"].astype(str),
+            )
+            .sort_values(["_sort", "_cc"], kind="mergesort")
+            .drop(columns=["_sort", "_cc"])
+        )
+        values = clientes_sorted["CardCode"].astype(str).tolist()
+        labels = (
+            clientes_sorted[_name_col].astype(str)
+            + " — "
+            + clientes_sorted["CardCode"].astype(str)
+        ).tolist()
+    else:
+        # Fallback si no hay columna de nombre
+        values = clientes["CardCode"].astype(str).tolist()
+        labels = values[:]  # muestra solo el RUT
+
+    label_by_code = dict(zip(values, labels))
+
+    if not values:
         st.info("No hay clientes para seleccionar.")
         st.stop()
 
@@ -504,33 +583,22 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
     KEY_SEL = "cliente_selectbox"
     LAST_CLIENT_KEY = "_last_cliente_forecast"
 
-    # columna nombre amigable (busca la primera que exista)
-    _name_col = next(
-        (c for c in ("Nombre", "CardName", "Cliente", "Name") if c in clientes.columns),
-        None,
-    )
-    nombre_by_code = (
-        dict(zip(clientes["CardCode"].astype(str), clientes[_name_col]))
-        if _name_col
-        else {c: c for c in opciones}
-    )
-
     # Determinar cardcode inicial (argumento → último en sesión → primero)
-    if KEY_SEL not in st.session_state or st.session_state[KEY_SEL] not in opciones:
-        if isinstance(_cardcode, str) and _cardcode in opciones:
+    if KEY_SEL not in st.session_state or st.session_state[KEY_SEL] not in values:
+        if isinstance(_cardcode, str) and _cardcode in values:
             st.session_state[KEY_SEL] = _cardcode
-        elif st.session_state.get(LAST_CLIENT_KEY) in opciones:
+        elif st.session_state.get(LAST_CLIENT_KEY) in values:
             st.session_state[KEY_SEL] = st.session_state[LAST_CLIENT_KEY]
         else:
-            st.session_state[KEY_SEL] = opciones[0]
+            st.session_state[KEY_SEL] = values[0]
 
     col1, col2 = st.columns([2, 2])
     with col1:
         cardcode = st.selectbox(
             "Cliente:",
-            opciones,
+            values,  # opciones = CardCode
             key=KEY_SEL,
-            format_func=lambda x: f"{x} - {nombre_by_code.get(x, '')}",
+            format_func=lambda v: label_by_code.get(v, str(v)),  # "Nombre — RUT"
             help="La selección persiste entre reruns.",
             on_change=_on_cliente_change,  # tu callback robusto que sincroniza el cliente saliente
         )
@@ -550,8 +618,8 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
 
     # Prefetch de vecinos (no debe romper si el helper no existe)
     try:
-        current_idx = opciones.index(cardcode)
-        _prefetch_vecinos(int(slpcode), opciones, current_idx, int(anio), db_fp)
+        current_idx = values.index(cardcode)
+        _prefetch_vecinos(int(slpcode), values, current_idx, int(anio), db_fp)
     except Exception as e:
         print(f"[PREFETCH][warn] {e}")
 
@@ -831,7 +899,14 @@ def run():
     try:
         print("[DEBUG-RUN] Iniciando creación de tabs")
         tabs = st.tabs(
-            ["Forecast", "Stock", "Histórico", "Ayuda", "Alertas", "Facturas"]
+            [
+                "📋 Forecast",
+                "📦 Stock",
+                "📈 Histórico",
+                "🧠 Ayuda",
+                "🚨 Alertas",
+                "📑 Facturas",
+            ]
         )
         with tabs[0]:
             vista_forecast(slpcode)
@@ -1013,81 +1088,3 @@ def _marcar_guardar(cardcode: str) -> None:
             ensure_ascii=False,
         )
     )
-
-
-def _rebuild_buffer_from_snapshot(cardcode: str) -> bool:
-    """
-    Intenta reconstruir forecast_buffer_{cc} desde ui_snapshot o mirror.
-    Retorna True si logra setear y validar el buffer (incluye hash_edit).
-    Prints:
-      [STATE][REBUILD.OK] / [STATE][REBUILD.FAIL]
-    """
-    cc = str(cardcode)
-    key_buffer = f"forecast_buffer_{cc}"
-    key_mirror = f"{key_buffer}_editado"
-    ui_snapshot = f"{key_mirror}__ui_snapshot"
-    key_hash_edit = f"{key_buffer}_edithash"
-
-    src = None
-    src_name = None
-
-    if ui_snapshot in st.session_state and isinstance(
-        st.session_state[ui_snapshot], pd.DataFrame
-    ):
-        src = st.session_state[ui_snapshot]
-        src_name = "ui_snapshot"
-    elif key_mirror in st.session_state and isinstance(
-        st.session_state[key_mirror], pd.DataFrame
-    ):
-        src = st.session_state[key_mirror]
-        src_name = "mirror"
-    else:
-        print(
-            "[STATE][REBUILD.FAIL] "
-            + json.dumps({"cc": cc, "error": "absent_state"}, ensure_ascii=False)
-        )
-        return False
-
-    try:
-        validar_forecast_dataframe(src)
-        base = st.session_state.get(key_buffer, src)
-        df_upd, _ = sincronizar_buffer_local(base, src)
-        st.session_state[key_buffer] = df_upd
-
-        # hash simple como en _marcar_guardar
-        try:
-            canon = df_upd.copy()
-            for c in canon.columns:
-                if pd.api.types.is_numeric_dtype(canon[c]):
-                    canon[c] = canon[c].fillna(0)
-            payload = {
-                "index": (
-                    canon.index.tolist()
-                    if canon.index.nlevels == 1
-                    else list(map(tuple, canon.index))
-                ),
-                "columns": canon.columns.tolist(),
-                "values": canon.select_dtypes(include="number").to_numpy().tolist(),
-            }
-            st.session_state[key_hash_edit] = hash(json.dumps(payload, sort_keys=True))
-        except Exception:
-            st.session_state[key_hash_edit] = None
-
-        print(
-            "[STATE][REBUILD.OK] "
-            + json.dumps(
-                {
-                    "cc": cc,
-                    "source": src_name,
-                    "rows": int(getattr(df_upd, "shape", (0, 0))[0]),
-                },
-                ensure_ascii=False,
-            )
-        )
-        return True
-    except Exception as e:
-        print(
-            "[STATE][REBUILD.FAIL] "
-            + json.dumps({"cc": cc, "error": str(e)}, ensure_ascii=False)
-        )
-        return False

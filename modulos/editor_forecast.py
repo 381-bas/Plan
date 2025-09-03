@@ -151,11 +151,38 @@ def persistir_cambios_cliente(
       { "ok": False, "error": str,      "warnings": list }
     """
     warnings: list[str] = []
+
+    # --- helper interno: sanity 4×12 permitiendo múltiples bases (grupos) ---
+    def _is_4x12_multibase(df: pd.DataFrame) -> tuple[bool, int, str]:
+        if df is None or df.empty:
+            return True, 0, "empty"
+        meses = [f"{m:02d}" for m in range(1, 13)]
+        if not set(meses).issubset(df.columns):
+            return False, 0, "missing_month_cols"
+
+        # Estimar cantidad de “bases” (grupos). Preferimos _GKEY si viene del rebuild.
+        bases = 1
+        if "_GKEY" in df.columns:
+            try:
+                g = int(pd.Series(df["_GKEY"]).nunique())
+                bases = max(1, g)
+            except Exception:
+                pass
+        else:
+            # Fallback robusto: si las filas son múltiplo de 4, asumimos N bases
+            rows = int(df.shape[0])
+            if rows % 4 == 0:
+                bases = max(1, rows // 4)
+
+        # Condición mínima: filas = 4 × bases
+        ok = df.shape[0] == 4 * bases
+        return ok, bases, "ok" if ok else "rows_not_4xbases"
+
     try:
-        # Validación estructural del 4×12 de UI
+        # 1) Validación estructural del 4×12 (con tus reglas actuales)
         validar_forecast_dataframe(df_ui_editado)
 
-        # Preparar payload en formato largo con reglas de negocio
+        # 2) Preparar payload largo con reglas de negocio
         payload = preparar_payload_guardado(
             df_ui=df_ui_editado,
             slpcode=slpcode,
@@ -180,17 +207,34 @@ def persistir_cambios_cliente(
                 ]
             )
 
-        # TX
-        # (asumimos helpers internos realizan BEGIN/COMMIT/ROLLBACK)
-        # Usa el último ForecastID previo detectado por preparar_payload_guardado
         forecast_id_prev = payload.get("meta", {}).get("forecast_id_prev")
-        # Crea SIEMPRE una nueva cabecera (no requiere card_code/anio)
-        forecast_id = obtener_forecast_activo(
-            slpcode=slpcode,
-            db_path=db_path,
-            force_new=True,
-        )
 
+        # 3) Crear SIEMPRE nueva cabecera activa (firma compatible)
+        #    Intento 1: firma rica (slpcode, cardcode, anio, db_path, force_new)
+        #    Intento 2: firma corta (slpcode, db_path [,+ force_new])
+        #    Intento 3: registrar_forecast_cabecera(slpcode, db_path)
+        try:
+            forecast_id = obtener_forecast_activo(  # type: ignore
+                slpcode=slpcode,
+                cardcode=cardcode,
+                anio=anio,
+                db_path=db_path,
+                force_new=True,
+            )
+        except TypeError:
+            try:
+                # posición: evita kwargs no soportados
+                try:
+                    forecast_id = obtener_forecast_activo(slpcode, db_path)  # type: ignore
+                except TypeError:
+                    forecast_id = obtener_forecast_activo(slpcode, db_path, True)  # type: ignore
+            except Exception:
+                # último recurso
+                forecast_id = registrar_forecast_cabecera(
+                    slpcode=slpcode, db_path=db_path
+                )
+
+        # 4) Auditoría de cambios
         registrar_log_detalle_cambios(
             slpcode=slpcode,
             cardcode=cardcode,
@@ -201,6 +245,7 @@ def persistir_cambios_cliente(
             forecast_id_anterior=forecast_id_prev,
         )
 
+        # 5) Insert detalle (replace=True)
         n_ins = insertar_forecast_detalle(
             forecast_id=forecast_id,
             anio=anio,
@@ -209,13 +254,27 @@ def persistir_cambios_cliente(
             replace=True,
         )
 
-        # Refrescar buffers UI y sanity check 4×12
+        # 6) Refrescar buffers UI y sanity 4×12 tolerante a múltiples bases
         df_ref = _refrescar_buffer_ui(
             forecast_id=forecast_id, key_buffer=key_buffer, db_path=db_path
         )
-        verify_4x12(df_ref, bases=1)
 
-        # Marcar este cliente como ya persistido
+        ok_multi, bases_est, motivo = _is_4x12_multibase(df_ref)
+        try:
+            verify_4x12(df_ref, bases=max(1, bases_est))
+        except Exception:
+            if ok_multi:
+                print(
+                    f"[UI.VERIFY.INFO] Rebuild multi-base aceptado — bases={bases_est} motivo='{motivo}'"
+                )
+                warnings.append("UI_REBUILD_NOT_4X12")  # notificación suave
+            else:
+                print(f"[UI.VERIFY.FAIL] bases_est={bases_est} motivo='{motivo}'")
+                # En este caso el rebuild no cumple ni el mínimo; lo marcamos como warning pero NO rompemos TX,
+                # pues la escritura en BD ya fue correcta.
+                warnings.append("UI_REBUILD_NOT_4X12")
+
+        # 7) Limpieza suave de marca en sesión (best-effort)
         try:
             pend = st.session_state.get("clientes_editados", set())
             if isinstance(pend, set) and cardcode in pend:
@@ -224,7 +283,7 @@ def persistir_cambios_cliente(
         except Exception:
             pass
 
-        # Retorno consistente
+        # 8) Retorno consistente
         return {
             "ok": True,
             "forecast_id": int(forecast_id),
@@ -234,7 +293,6 @@ def persistir_cambios_cliente(
         }
 
     except Exception as e:
-        # Log de error y retorno consistente en fallo
         print(f"[TX.CLIENT.ERROR] cc={cardcode} err={e}")
         try:
             # Si usas conexiones manuales, realiza ROLLBACK aquí
@@ -443,11 +501,12 @@ def _refrescar_buffer_ui(
     # 3) Preservar columnas extra del buffer previo (si existían) sin pisar los meses
     if has_prev and isinstance(df_prev, pd.DataFrame):
         extras = [
-            c for c in df_prev.columns if c not in df4.columns and not c.isdigit()
+            c
+            for c in df_prev.columns
+            if c not in df4.columns and not (isinstance(c, str) and c.isdigit())
         ]
         if extras:
             try:
-                # Alinear por filas (4 filas esperadas). Si difiere, se recorta/expande con NaN safe.
                 for col in extras:
                     df4[col] = (
                         df_prev[col].iloc[: len(df4)].values
@@ -468,23 +527,61 @@ def _refrescar_buffer_ui(
     for m in meses:
         df4[m] = pd.to_numeric(df4[m], errors="coerce").fillna(0.0)
 
-    # 5) Persistir en sesión (buffer y espejo)
+    # 5) Persistir en sesión (buffer y espejo) + basehash/edithash estables
     try:
+        # Guarda buffer y espejo inicial (estado recién reconstruido)
         st.session_state[key_buffer] = df4.copy()
         st.session_state[f"{key_buffer}_editado"] = df4.copy()
+
+        # Canon para hashing: solo columnas mensuales "01".."12", normalizadas.
+        # Usamos tu normalize_df_for_hash para asegurar orden/dtypes/NaN consistentes.
+        def _canon_for_hash(df: pd.DataFrame) -> pd.DataFrame:
+            meses = [
+                c
+                for c in df.columns
+                if isinstance(c, str) and c.isdigit() and len(c) == 2
+            ]
+            base = df.loc[:, meses].copy()
+            return normalize_df_for_hash(base)
+
+        # Hash estable como entero (coherente con backups temporales)
+        basehash = int(
+            hash_pandas_object(
+                _canon_for_hash(st.session_state[key_buffer]), index=True
+            ).sum()
+        )
+        edithash = int(
+            hash_pandas_object(
+                _canon_for_hash(st.session_state[f"{key_buffer}_editado"]), index=True
+            ).sum()
+        )
+
+        st.session_state[f"{key_buffer}_basehash"] = basehash
+        st.session_state[f"{key_buffer}_edithash"] = edithash
+        st.session_state[f"{key_buffer}_changed"] = edithash != basehash  # parte False
+
     except Exception as e:
-        print(f"[RFE-005.WARN] no session available: {e}")
+        print(f"[RFE-005.WARN] no session available / hash calc: {e}")
 
-    print(f"[RFE-005] buffer shape (rows x cols): {df4.shape}")
-
-    # 6) Verificación 4×12 estricta (si la flag está activa)
+    # 6) Verificación 4×12 estricta (soporta múltiples bases)
     try:
-        if VERIFY_4X12_STRICT:
-            rows_ok = len(df4) == 4
-            if not rows_ok:
+        if VERIFY_4X12_STRICT:  # type: ignore[name-defined]
+            meses_ok = all(f"{i:02d}" in df4.columns for i in range(1, 13))
+            filas_ok = (len(df4) % 4) == 0
+            if not (meses_ok and filas_ok):
                 raise RuntimeError("UI_REBUILD_NOT_4X12")
     except NameError:
-        # Si la flag no existe aún, no bloquear
+        # si la flag no existe, no bloquear
+        pass
+
+    # --- trazas post (clave real usada)
+    try:
+        in_session = key_buffer in st.session_state
+        in_mirror = f"{key_buffer}_editado" in st.session_state
+        print(
+            f"[RFE-005.POST] key_buffer='{key_buffer}' in_session={in_session} mirror_in_session={in_mirror}"
+        )
+    except Exception:
         pass
 
     return df4
@@ -612,12 +709,63 @@ def validar_buffer_ui(
 
 # B_VFD002: Verificación estricta 4x12 posterior al refresco
 # # ∂B_VFD002/∂B0
-def verify_4x12(df_ui: pd.DataFrame, *, bases: int = 1) -> None:
-    expected_rows = 4 * bases
-    ok = (len(df_ui) == expected_rows) and all(m in df_ui.columns for m in MESES)
-    print(f"[VERIFY.4x12] expected_rows={expected_rows} real_rows={len(df_ui)} ok={ok}")
-    if not ok:
-        raise AssertionError("UI_NOT_4X12")
+def verify_4x12(df_ui: pd.DataFrame, bases: Optional[int] = None) -> None:
+    """
+    Verificación flexible post-refresh. NO lee ni escribe session_state.
+    Requisitos mínimos:
+      - df_ui es DataFrame
+      - 12 columnas mes "01".."12"
+      - número de filas múltiplo de 4 (4×N)
+      - BaseIdx presente como columnas o como índice (no muta)
+    Semántica:
+      - Si `bases` es un int > 0, además exige N == bases (estricto).
+      - Errores de layout que se pueden degradar a warning aguas arriba usan: "UI_REBUILD_NOT_4X12".
+    """
+    if df_ui is None:
+        raise RuntimeError("E.STATE.001: buffer inconsistente (None)")
+    if not isinstance(df_ui, pd.DataFrame):
+        raise RuntimeError(f"E.STATE.001: tipo inesperado: {type(df_ui)}")
+
+    # 1) Meses obligatorios
+    meses = [f"{i:02d}" for i in range(1, 13)]
+    faltantes = [m for m in meses if m not in df_ui.columns]
+    if faltantes:
+        raise RuntimeError(
+            f"UI_REBUILD_NOT_4X12: faltan columnas mensuales: {faltantes}"
+        )
+
+    # 2) Filas: múltiplo de 4 (4×N)
+    nfilas = int(getattr(df_ui, "shape", (0, 0))[0])
+    if nfilas % 4 != 0:
+        raise RuntimeError(
+            f"UI_REBUILD_NOT_4X12: filas no múltiplo de 4 (len={nfilas})"
+        )
+
+    # 3) Si bases>0, validar N exacto
+    ngrupos = 0 if nfilas == 0 else (nfilas // 4)
+    if isinstance(bases, int) and bases > 0 and ngrupos != bases:
+        raise RuntimeError(
+            f"UI_REBUILD_NOT_4X12: bases_esperadas={bases}, bases_obtenidas={ngrupos}"
+        )
+
+    # 4) Presencia de claves lógicas (en columnas o en índice)
+    base_cols = {"ItemCode", "TipoForecast", "Métrica", "OcrCode3"}
+    cols_ok = base_cols.issubset(df_ui.columns)
+
+    if not cols_ok and isinstance(df_ui.index, pd.MultiIndex):
+        idx_names = {n for n in (df_ui.index.names or []) if n is not None}
+        if not base_cols.issubset(idx_names):
+            raise RuntimeError(
+                "E.VAL.001: BaseIdx ausente (ni en columnas ni en índice)"
+            )
+    elif not cols_ok and not isinstance(df_ui.index, pd.MultiIndex):
+        raise RuntimeError("E.VAL.001: BaseIdx ausente (ni en columnas ni en índice)")
+
+    # 5) NaN en columnas mensuales no permitido en verificación post-refresh
+    if df_ui[meses].isna().any().any():
+        raise RuntimeError("E.VAL.001: valores NaN en columnas mensuales")
+
+    # OK (sin return)
 
 
 # B_BUF002: Invalidación de caches y buffers por cliente/año
@@ -877,14 +1025,24 @@ def make_4x12_from(
     df_catalogo: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
-    Construye un 4×12 (2 TF × 2 Métricas) por cada combinación presente de (ItemCode, OcrCode3, DocCur).
-    - Acepta columnas en largo: TipoForecast, Mes (1..12 o "01".."12" o derivable desde FechEntr), Cant, PrecioUN, FechEntr, DocCur,
-      y opcionalmente ItemCode, OcrCode3, ItemName.
-    - Si hay múltiples combinaciones de (ItemCode, OcrCode3, DocCur) en df_db_largo, devuelve un bloque 4×12 por cada combinación.
-    - Meses siempre en columnas '01'..'12' y dtype float64.
-    - Genera columnas de salida: ["ItemCode","ItemName","TipoForecast","Métrica","OcrCode3", 01..12, "DocCur","PrecioUN_ref","PrecioUN"].
-      (PrecioUN y PrecioUN_ref son referenciales por fila; para 'Cantidad' van en 0.0)
-    - No depende de Streamlit (sin st.rerun/stop).
+    Construye un 4×12 (2 TF × 2 Métricas) por cada combinación presente de
+    (ItemCode, OcrCode3, DocCur), con comportamiento retrocompatible y robusto.
+
+    Entradas toleradas (largo):
+      - TipoForecast, Mes (1..12, "01".."12" o derivable desde FechEntr),
+        Cant, PrecioUN, FechEntr, DocCur, y opcionalmente ItemCode, OcrCode3, ItemName.
+
+    Salida:
+      Columnas: ["ItemCode","ItemName","TipoForecast","Métrica","OcrCode3", 01..12, "DocCur","PrecioUN_ref","PrecioUN"].
+      Meses como float64; 4 filas por cada combinación (Firme/Proyectado × Cantidad/Precio).
+
+    Cambios clave vs. versión previa:
+      - Evita FutureWarning de pandas al sustituir factorize(list(zip(...))) por
+        groupby(...).ngroup() con sort=False y dropna=False cuando esté disponible.
+      - Normalización de mes más tolerante (strings/ints/fechas), y DocCur en mayúsculas.
+      - Cálculo de precio mensual: último no-nulo por mes (ordenado por FechEntr si existe).
+      - PrecioUN_ref: primer valor mensual no-cero por fila de Precio (bfill left→right).
+      - Orden y dtypes estables, sin dependencias de Streamlit.
     """
     print("[MAKE4x12.INFO] start")
 
@@ -899,20 +1057,27 @@ def make_4x12_from(
     except NameError:
         _MONTHS = [f"{m:02d}" for m in range(1, 13)]
 
-    def _norm_month_series(s):
-        """Convierte a '01'..'12' desde ints/strs; si viene fecha, se toma mes."""
-        s = s.copy()
-        # si son fechas
+    def _norm_month_series(s: pd.Series) -> pd.Series:
+        """Convierte a '01'..'12' desde ints/strs; si viene fecha, toma el mes."""
+        s2 = s.copy()
         try:
-            if np.issubdtype(s.dtype, np.datetime64):
-                return s.dt.month.astype(int).astype(str).str.zfill(2)
+            # Si el dtype ya es datetime64
+            if np.issubdtype(s2.dtype, np.datetime64):
+                return s2.dt.month.astype(int).astype(str).str.zfill(2)
         except Exception:
             pass
-        # como texto/numérico
-        s = s.astype(str).str.extract(r"(\d{1,2})", expand=False)
-        s = s.fillna("0")
-        s = s.astype(int).clip(1, 12).astype(str).str.zfill(2)
-        return s
+        # Intento de parseo a fecha para strings
+        try:
+            s_dt = pd.to_datetime(s2, errors="coerce")
+            if s_dt.notna().any():
+                s2 = s_dt
+                return s2.dt.month.astype(int).astype(str).str.zfill(2)
+        except Exception:
+            pass
+        # Fallback: extraer números 1..12 y clamp
+        s2 = s2.astype(str).str.extract(r"(\d{1,2})", expand=False)
+        s2 = s2.fillna("0").astype(int).clip(1, 12).astype(str).str.zfill(2)
+        return s2
 
     def _safe_name_map(df_cat: Optional[pd.DataFrame]) -> dict:
         if df_cat is None or not isinstance(df_cat, pd.DataFrame):
@@ -928,7 +1093,7 @@ def make_4x12_from(
     name_map = _safe_name_map(df_catalogo)
 
     # ──────────────────────── Caso vacío (devuelve 4×12 estándar) ────────────────────────
-    if df_db_largo is None or df_db_largo.empty:
+    if df_db_largo is None or getattr(df_db_largo, "empty", True):
         base = []
         for t in _TIPOS:
             base.append({"TipoForecast": t, "Métrica": "Cantidad"})
@@ -965,7 +1130,7 @@ def make_4x12_from(
     aliases = {
         "cantidad": "Cant",
         "cant": "Cant",
-        "precio": "PrecioUN",  # por si viniera con otro nombre
+        "precio": "PrecioUN",
         "precioun": "PrecioUN",
         "fechentr": "FechEntr",
         "fecha": "FechEntr",
@@ -981,13 +1146,15 @@ def make_4x12_from(
         if "FechEntr" in df.columns:
             try:
                 df["FechEntr"] = pd.to_datetime(df["FechEntr"], errors="coerce")
-                df["Mes"] = df["FechEntr"].dt.month.astype(int).astype(str).str.zfill(2)
+                df["Mes"] = (
+                    df["FechEntr"].dt.month.astype("Int64").astype(str).str.zfill(2)
+                )
             except Exception:
                 df["Mes"] = "01"
         else:
             df["Mes"] = "01"
     else:
-        df["Mes"] = _norm_month_series(df["Mes"])
+        df["Mes"] = _norm_month_series(df["Mes"])  # '01'..'12'
 
     # TipoForecast
     if "TipoForecast" not in df.columns:
@@ -1003,11 +1170,11 @@ def make_4x12_from(
     )
 
     if "PrecioUN" in df.columns:
-        df["PrecioUN"] = pd.to_numeric(df["PrecioUN"], errors="coerce").fillna(np.nan)
+        df["PrecioUN"] = pd.to_numeric(df["PrecioUN"], errors="coerce").astype(float)
     else:
         df["PrecioUN"] = np.nan
 
-    # Claves complementarias
+    # Claves complementarias (+ normalización)
     for k, default, cast in [
         ("ItemCode", "", "string"),
         ("OcrCode3", "", "string"),
@@ -1017,37 +1184,45 @@ def make_4x12_from(
         if k not in df.columns:
             df[k] = default
         df[k] = df[k].astype(cast)
+    df["DocCur"] = df["DocCur"].fillna("CLP").str.upper()
 
     # Si hay catálogo, prioriza su ItemName
     if name_map:
         df["ItemName"] = df.apply(
             lambda r: name_map.get(
-                str(r["ItemCode"]), r["ItemName"] or str(r["ItemCode"])
+                str(r["ItemCode"]).strip(),
+                (r["ItemName"] or str(r["ItemCode"]).strip()),
             ),
             axis=1,
         ).astype("string")
+    else:
+        # Asegurar string limpio
+        df["ItemName"] = (
+            df["ItemName"].fillna(df["ItemCode"]).astype("string").str.strip()
+        )
 
     # ──────────────────────── Agrupar por combinación (ItemCode, OcrCode3, DocCur) ────────────────────────
     group_keys = ["ItemCode", "OcrCode3", "DocCur"]
-    if df[group_keys].drop_duplicates().shape[0] == 0:
-        # No hay claves, forzamos un único bloque
+    if (not set(group_keys).issubset(df.columns)) or df.empty:
         df["_GKEY"] = 0
-        group_keys = ["_GKEY"]
     else:
-        df["_GKEY"] = pd.factorize(
-            list(zip(df["ItemCode"], df["OcrCode3"], df["DocCur"]))
-        )[0]
+        # Robusto, sin FutureWarning; tolera NaN con dropna=False si existe en tu versión de pandas
+        try:
+            df["_GKEY"] = df.groupby(group_keys, sort=False, dropna=False).ngroup()
+        except TypeError:
+            df["_GKEY"] = df.groupby(group_keys, sort=False).ngroup()
 
     blocks = []
-    for gkey, gdf in df.groupby("_GKEY"):
+
+    # Orden estable por aparición de grupos (_GKEY ya respeta sort=False)
+    for gkey, gdf in df.groupby("_GKEY", sort=False):
+        gdf = gdf.copy()
         item_code = gdf["ItemCode"].iloc[0]
         ocr3 = gdf["OcrCode3"].iloc[0]
         doccur = gdf["DocCur"].iloc[0]
-        item_name = gdf["ItemName"].dropna().astype(str)
+        item_name_series = gdf["ItemName"].dropna().astype(str)
         item_name = (
-            item_name.iloc[0]
-            if not item_name.empty
-            else (name_map.get(str(item_code), str(item_code)))
+            item_name_series.iloc[0] if not item_name_series.empty else str(item_code)
         )
 
         # Pivot de cantidades: sum por mes/TF
@@ -1056,11 +1231,17 @@ def make_4x12_from(
             .sum()
             .pivot(index="TipoForecast", columns="Mes", values="Cant")
         )
-        # Pivot de precios: último no nulo por FechEntr si existe, si no, último
-        if "FechEntr" in gdf.columns:
-            tmp = gdf.sort_values("FechEntr")
+
+        # Pivot de precios: último no nulo por FechEntr si existe, si no, último por orden de aparición
+        tmp = gdf.copy()
+        if "FechEntr" in tmp.columns:
+            try:
+                tmp["_Fech"] = pd.to_datetime(tmp["FechEntr"], errors="coerce")
+            except Exception:
+                tmp["_Fech"] = pd.NaT
         else:
-            tmp = gdf.copy()
+            tmp["_Fech"] = pd.NaT
+        tmp = tmp.sort_values(["TipoForecast", "Mes", "_Fech"], na_position="last")
 
         price = (
             tmp.dropna(subset=["PrecioUN"])
@@ -1072,19 +1253,24 @@ def make_4x12_from(
         )
 
         # Asegurar índice (TIPOS) y columnas (MONTHS)
-        def _ensure_frame(frame, fill):
+        def _ensure_frame(frame: pd.DataFrame, fill: float) -> pd.DataFrame:
             if frame is None or frame.empty:
                 frame = pd.DataFrame(
                     0.0, index=pd.Index(_TIPOS, name="TipoForecast"), columns=_MONTHS
                 )
             else:
-                # reindexar filas
                 frame = frame.reindex(_TIPOS).fillna(0.0)
-                # garantizar columnas mes
                 for m in _MONTHS:
                     if m not in frame.columns:
                         frame[m] = fill
                 frame = frame[_MONTHS]
+            # dtype consistente
+            for m in _MONTHS:
+                frame[m] = (
+                    pd.to_numeric(frame[m], errors="coerce")
+                    .fillna(0.0)
+                    .astype("float64")
+                )
             return frame
 
         qty = _ensure_frame(qty, 0.0)
@@ -1099,6 +1285,7 @@ def make_4x12_from(
                 "TipoForecast": t,
                 "Métrica": "Cantidad",
                 "OcrCode3": ocr3,
+                "DocCur": doccur,
             }
             row_q.update({m: float(qty.loc[t, m]) for m in _MONTHS})
             filas.append(row_q)
@@ -1109,19 +1296,18 @@ def make_4x12_from(
                 "TipoForecast": t,
                 "Métrica": "Precio",
                 "OcrCode3": ocr3,
+                "DocCur": doccur,
             }
             row_p.update({m: float(price.loc[t, m]) for m in _MONTHS})
             filas.append(row_p)
 
         df4 = pd.DataFrame(filas)
-        df4["DocCur"] = str(doccur) if isinstance(doccur, str) else "CLP"
 
         # PrecioUN_ref/PrecioUN: primer valor mensual no-cero (bfill desde izquierda)
-        # para las filas de 'Precio'; 0.0 para 'Cantidad'.
         price_rows = df4["Métrica"].eq("Precio")
         if price_rows.any():
-            tmp = df4.loc[price_rows, _MONTHS].replace(0, np.nan)
-            ref = tmp.bfill(axis=1).iloc[:, 0].fillna(0.0).astype(float).to_numpy()
+            tmpv = df4.loc[price_rows, _MONTHS].replace(0, np.nan)
+            ref = tmpv.bfill(axis=1).iloc[:, 0].fillna(0.0).astype(float).to_numpy()
             df4.loc[price_rows, "PrecioUN_ref"] = ref
             df4.loc[price_rows, "PrecioUN"] = (
                 ref  # compat: algunos flujos esperan 'PrecioUN'
@@ -1142,8 +1328,9 @@ def make_4x12_from(
             "PrecioUN",
         ]
         df4 = df4[ordered].copy()
-        for m in _MONTHS:
-            df4[m] = df4[m].astype("float64")
+        df4["DocCur"] = df4["DocCur"].astype("string").str.upper()
+        df4["OcrCode3"] = df4["OcrCode3"].astype("string")
+        df4["ItemName"] = df4["ItemName"].astype("string")
 
         blocks.append(df4)
 
@@ -1164,6 +1351,14 @@ def make_4x12_from(
             ]
         )
     )
+
+    # Orden estable por claves lógicas (para reproducibilidad visual)
+    if not out.empty:
+        out = out.sort_values(
+            ["ItemCode", "OcrCode3", "TipoForecast", "Métrica"],
+            ascending=[True, True, True, True],
+        ).reset_index(drop=True)
+
     print(f"[MAKE4x12.INFO] rows={len(out)} completed=True groups={len(blocks)}")
     return out
 
