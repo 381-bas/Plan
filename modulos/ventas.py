@@ -1,20 +1,20 @@
 ﻿# B_VIN002: Importaciones fundacionales y dependencias funcionales para ventas
 # # ∂B_VIN002/∂B0
 import hashlib
-from pathlib import Path
 import numpy as np
 import streamlit as st
 import pandas as pd
 import json
 import time
 import unicodedata
+from datetime import datetime
+from pathlib import Path
 from utils.db import (
     run_query,
     DB_PATH,
-    _forecast_id_visible,
 )
 
-
+from core.inicio_ventas import render_dashboard
 from config.contexto import obtener_anio
 from core.consultas_forecast import (
     obtener_clientes,
@@ -490,6 +490,23 @@ def _norm(text: str) -> str:
     return base.casefold().strip()
 
 
+def _editable_months_q4(anio: int) -> set[str]:
+    """
+    Regla: sólo Q4 es editable y únicamente los meses *posteriores* al mes actual.
+    - Si anio > año actual: editable {"10","11","12"}
+    - Si anio == año actual: editable {m ∈ {10,11,12} | m > mes_actual}
+    - Si anio < año actual: editable ∅
+    """
+    hoy = datetime.now()
+    if anio > hoy.year:
+        return {"10", "11", "12"}
+    if anio < hoy.year:
+        return set()
+
+    mes_actual = hoy.month
+    return {f"{m:02d}" for m in (10, 11, 12) if m > mes_actual}
+
+
 # B_VFO001: Editor visual controlado y selección de cliente para forecast editable
 # # ∂B_VFO001/∂B0
 def vista_forecast(slpcode: int, _cardcode: str | None = None):
@@ -519,7 +536,6 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
         st.error("Código de vendedor inválido en sesión.")
         st.stop()
 
-    # DB_PATH seguro + fingerprint 6-tuple
     DB_PATH_local = get_db_path()
     db_fp = _db_fingerprint(DB_PATH_local)
 
@@ -541,7 +557,6 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
     if clientes is None or getattr(clientes, "empty", True):
         st.info("Este vendedor no tiene clientes activos.")
         st.stop()
-
     if "CardCode" not in clientes.columns:
         st.error("Listado de clientes sin CardCode.")
         st.stop()
@@ -569,12 +584,10 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
             + clientes_sorted["CardCode"].astype(str)
         ).tolist()
     else:
-        # Fallback si no hay columna de nombre
         values = clientes["CardCode"].astype(str).tolist()
         labels = values[:]  # muestra solo el RUT
 
     label_by_code = dict(zip(values, labels))
-
     if not values:
         st.info("No hay clientes para seleccionar.")
         st.stop()
@@ -582,8 +595,6 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
     # Selección persistente
     KEY_SEL = "cliente_selectbox"
     LAST_CLIENT_KEY = "_last_cliente_forecast"
-
-    # Determinar cardcode inicial (argumento → último en sesión → primero)
     if KEY_SEL not in st.session_state or st.session_state[KEY_SEL] not in values:
         if isinstance(_cardcode, str) and _cardcode in values:
             st.session_state[KEY_SEL] = _cardcode
@@ -592,7 +603,24 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
         else:
             st.session_state[KEY_SEL] = values[0]
 
-    col1, col2 = st.columns([2, 2])
+    # Helper para scoping de claves (global/vendor/cliente)
+    def _scoped_key(
+        base: str,
+        scope: str = "client",
+        *,
+        slp: int | None = None,
+        card: str | None = None,
+    ) -> str:
+        if scope == "global":
+            return base
+        if scope == "vendor":
+            return f"{base}_slp{slp}"
+        # por defecto, client
+        return f"{base}_{card}"
+
+    # ──────────────────────────── Filtros en UNA SOLA LÍNEA (cliente / productos / meses) ────────────────────────────
+    col1, col2, col3 = st.columns([2, 2, 1])  # ← misma fila de filtros
+
     with col1:
         cardcode = st.selectbox(
             "Cliente:",
@@ -600,20 +628,8 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
             key=KEY_SEL,
             format_func=lambda v: label_by_code.get(v, str(v)),  # "Nombre — RUT"
             help="La selección persiste entre reruns.",
-            on_change=_on_cliente_change,  # tu callback robusto que sincroniza el cliente saliente
+            on_change=_on_cliente_change,
         )
-
-        # Mostrar el último ForecastID visible (consultando DB)
-        try:
-            fid = _forecast_id_visible(
-                int(slpcode), str(cardcode), int(anio), db_path=DB_PATH_local
-            )
-            if fid is not None:
-                st.caption(f"Último ForecastID detectado → {fid}")
-        except Exception as e:
-            print(f"[FID][warn] {e}")
-
-    # Persistir selección actual para próximos reruns
     st.session_state[LAST_CLIENT_KEY] = cardcode
 
     # Prefetch de vecinos (no debe romper si el helper no existe)
@@ -666,7 +682,6 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
         st.session_state[key_hash_base] = base_hash
         if key_mirror not in st.session_state:
             st.session_state[key_mirror] = st.session_state[key_buffer].copy()
-        # reset flags propios del cliente al cambiar baseline
         st.session_state.pop(f"_do_save_{cardcode}", None)
         st.session_state.pop(f"_saving_{cardcode}", None)
         print(
@@ -685,24 +700,75 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
         st.error("No hay buffer en sesión para este cliente.")
         st.stop()
 
-    df_buffer = st.session_state[key_buffer].reset_index()  # staging (guardable)
+    df_buffer = df_src.reset_index()  # staging (guardable)
     df_mostrar = df_src.reset_index()  # visual (mirror)
 
-    # ──────────────────────────── Filtro de producto ────────────────────────────
+    # ──────────────────────────── Filtro de PRODUCTO (multiselección; recuerda por CLIENTE) ────────────────────────────
     with col2:
-        itemcode_filtro = st.selectbox(
-            "🔍 Filtrar producto:",
-            ["Todos"] + sorted(df_mostrar["ItemCode"].astype(str).unique().tolist()),
-            key=f"filtro_producto_{cardcode}",
-        )
+        if {"ItemCode", "ItemName"} <= set(df_mostrar.columns):
+            productos_df = (
+                df_mostrar[["ItemCode", "ItemName"]]
+                .drop_duplicates()
+                .assign(
+                    ItemCode=lambda d: d["ItemCode"].astype(str),
+                    ItemName=lambda d: d["ItemName"].fillna("").astype(str),
+                )
+                .sort_values(["ItemName", "ItemCode"], kind="mergesort")
+            )
+            _codes = productos_df["ItemCode"].tolist()
+            nombres_map = dict(zip(productos_df["ItemCode"], productos_df["ItemName"]))
+            prod_key = _scoped_key(
+                "filtro_producto_multi", scope="client", card=cardcode
+            )
+            prods_sel = st.multiselect(
+                "🔍 Productos:",
+                _codes,  # opciones
+                key=prod_key,  # recuerda por cliente
+                format_func=lambda code: f"{nombres_map.get(code, '')} – {code}".strip(),
+                help="Selecciona 1+ productos; vacío = todos.",
+            )
+        else:
+            _codes = sorted(df_mostrar["ItemCode"].astype(str).unique().tolist())
+            prod_key = _scoped_key(
+                "filtro_producto_multi", scope="client", card=cardcode
+            )
+            prods_sel = st.multiselect(
+                "🔍 Productos (códigos):",
+                _codes,
+                key=prod_key,
+                help="Vacío = todos.",
+            )
 
-    if itemcode_filtro != "Todos":
-        df_mostrar = df_mostrar[
-            df_mostrar["ItemCode"].astype(str) == itemcode_filtro
-        ].copy()
-        df_buffer = df_buffer[
-            df_buffer["ItemCode"].astype(str) == itemcode_filtro
-        ].copy()
+    if prods_sel:  # si hay selección, filtramos; si está vacío, mostramos todos
+        mask_codes = df_mostrar["ItemCode"].astype(str).isin(prods_sel)
+        df_mostrar = df_mostrar[mask_codes].copy()
+        df_buffer = df_buffer[mask_codes].copy()
+
+    # ──────────────────────────── Filtro de MES (multiselección; recuerda por VENDEDOR) ────────────────────────────
+    MONTH_ABBR = {
+        "01": "Ene",
+        "02": "Feb",
+        "03": "Mar",
+        "04": "Abr",
+        "05": "May",
+        "06": "Jun",
+        "07": "Jul",
+        "08": "Ago",
+        "09": "Sep",
+        "10": "Oct",
+        "11": "Nov",
+        "12": "Dic",
+    }
+    all_months = [f"{m:02d}" for m in range(1, 13)]
+    with col3:
+        mes_key = _scoped_key("filtro_mes_multi", scope="vendor", slp=slpcode)
+        meses_sel = st.multiselect(
+            "🗓️ Meses:",
+            all_months,
+            key=mes_key,  # recuerda por vendedor
+            format_func=lambda v: MONTH_ABBR.get(v, v),
+            help="Elige 1+ meses; vacío = todos.",
+        )
 
     # ──────────────────────────── Orden/columnas editor ────────────────────────────
     campos_fijos = [
@@ -714,24 +780,54 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
         "Métrica",
     ]
     presentes = [c for c in campos_fijos if c in df_mostrar.columns]
-    columnas_ordenadas = presentes + [
+    columnas_ordenadas_full = presentes + [
         c for c in df_mostrar.columns if c not in presentes
     ]
-    df_mostrar = df_mostrar[columnas_ordenadas].sort_values(
+
+    # Visibilidad: si el usuario elige meses, solo mostramos esos; si no, todos
+    if meses_sel:
+        columnas_visibles = presentes + [
+            m for m in meses_sel if m in df_mostrar.columns
+        ]
+    else:
+        columnas_visibles = columnas_ordenadas_full
+
+    # Reordenación del DataFrame para consistencia visual
+    df_mostrar = df_mostrar[columnas_ordenadas_full].sort_values(
         ["ItemCode", "TipoForecast", "Métrica"], kind="stable"
     )
 
-    # ──────────────────────────── Config Editor ────────────────────────────
+    # ──────────────────────────── Config Editor (meses dinámicos, formato entero) ────────────────────────────
     column_config_forecast = {
         "ItemCode": st.column_config.TextColumn(label="Cod"),
+        "ItemName": st.column_config.TextColumn(label="Producto"),
         "TipoForecast": st.column_config.TextColumn(label="Tipo"),
         "OcrCode3": st.column_config.TextColumn(label="Linea"),
         "DocCur": st.column_config.TextColumn(label="$"),
     }
-    for mes in range(1, 13):
-        col = f"{mes:02d}"
-        column_config_forecast[col] = st.column_config.NumberColumn(
-            label=col, disabled=False
+
+    # Meses editables según regla Q4 dinámica (helper ya insertado en archivo)
+    EDITABLE_MONTHS = _editable_months_q4(anio)
+
+    # Caption informativa de meses editables
+    try:
+        _ed_list = (
+            ", ".join(MONTH_ABBR[m] for m in sorted(list(EDITABLE_MONTHS))) or "ninguno"
+        )
+        st.caption(f"Meses editables (regla Q4 dinámica): {_ed_list}")
+    except Exception:
+        pass
+
+    # Definición de columnas de meses (todas), con etiquetas abreviadas y bloqueo dinámico
+    for mes in all_months:
+        is_editable = mes in EDITABLE_MONTHS
+        abbr = MONTH_ABBR.get(mes, mes)
+        column_config_forecast[mes] = st.column_config.NumberColumn(
+            label=(abbr if is_editable else f"{abbr} 🔒"),
+            disabled=not is_editable,
+            step=0.01,  # permite ingresar decimales
+            format="%.0f",  # visual entero (compacto)
+            help=("Editable (Q4 dinámica)" if is_editable else "Bloqueado por fecha"),
         )
 
     # Alto en función del nº de filas
@@ -745,10 +841,21 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
         use_container_width=True,
         num_rows="fixed",
         height=height_px,
-        column_order=columnas_ordenadas,
+        column_order=columnas_visibles,  # ← solo los meses elegidos (o todos)
         column_config=column_config_forecast,
         hide_index=False,
     )
+
+    # ──────────────────────────── Guardia server-side (anti bypass) ────────────────────────────
+    try:
+        no_edit = sorted(set(all_months) - set(EDITABLE_MONTHS))
+        lock_cols = [
+            c for c in no_edit if c in df_editado.columns and c in df_mostrar.columns
+        ]
+        if lock_cols:
+            df_editado.loc[:, lock_cols] = df_mostrar[lock_cols].values
+    except Exception as e:
+        print(f"[LOCK-GUARD][warn] {e}")
 
     # Snapshot de UI
     try:
@@ -761,10 +868,9 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
     print(f"[DEBUG-VISTA] Cliente actual: {cardcode}")
     print(f"[DEBUG-VISTA] hay_cambios_real: {hay_cambios}")
 
-    # Estado de cambios/hash/validación (no añadimos a 'clientes_editados' aquí; lo hace el sellador)
+    # Estado de cambios/hash/validación
     edit_hash = None
     valid_err = None
-
     if hay_cambios:
         try:
             _df_for_edit_hash = _canon_for_hash(df_actualizado)
@@ -772,7 +878,6 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
             st.session_state[key_hash_edit] = edit_hash
         except Exception as e:
             print(f"[ERROR-VISTA] No se pudo calcular edit_hash: {e}")
-
         try:
             validar_forecast_dataframe(df_editado)
         except Exception as e:
@@ -785,7 +890,6 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
     save_flag_key = f"_do_save_{cardcode}"
     saving_key = f"_saving_{cardcode}"
 
-    # Conteo real de pendientes desde sesión (otros clientes + si ya hubo sellado)
     pend_set = st.session_state.get("clientes_editados", set())
     if not isinstance(pend_set, set):
         pend_set = set(pend_set) if pend_set else set()
@@ -803,9 +907,7 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
         disabled=bool(valid_err)
         or st.session_state.get(saving_key, False)
         or st.session_state.get("_saving_global", False),
-        on_click=lambda: _marcar_guardar(
-            cardcode
-        ),  # <-- SELLADO del activo + set de bandera
+        on_click=lambda: _marcar_guardar(cardcode),
     )
 
     # ──────────────────────────── Guardado batch (ruta fría unificada) ────────────────────────────
@@ -836,7 +938,6 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
 
             oks = res_batch.get("oks", [])
             fails = res_batch.get("fails", [])
-
             if oks:
                 st.success(
                     "✅ Guardado OK: "
@@ -849,7 +950,6 @@ def vista_forecast(slpcode: int, _cardcode: str | None = None):
                     )
             if not oks and not fails:
                 st.info("No hay cambios por guardar.")
-
         except Exception as e:
             print(f"[ERROR-SAVE] {e}")
             st.error(f"❌ Error durante el guardado: {e}")
@@ -879,27 +979,23 @@ def vista_ayuda():
 def run():
     print("[DEBUG-RUN] Iniciando función run()")
 
-    # 0) hidratar SlpCode desde la URL si la sesión está vacía
     if "SlpCode" not in st.session_state:
         slp_from_qp = _slp_from_url()
         if slp_from_qp is not None:
             st.session_state["SlpCode"] = slp_from_qp
 
-    # ✅ ÚNICA FUENTE efectiva
     slpcode = st.session_state.get("SlpCode")
-
     print(f"[DEBUG-RUN] Session state SlpCode: {slpcode}")
     if not isinstance(slpcode, int):
         st.error("No hay vendedor activo en la sesión. Vuelve al inicio y elige uno.")
         st.stop()
 
-    # 🔗 asegura URL canónica ?modulo=ventas&vendedor=...
     ensure_url_reflects_ventas(slpcode)
 
     try:
-        print("[DEBUG-RUN] Iniciando creación de tabs")
         tabs = st.tabs(
             [
+                "🏠 Inicio",
                 "📋 Forecast",
                 "📦 Stock",
                 "📈 Histórico",
@@ -909,16 +1005,18 @@ def run():
             ]
         )
         with tabs[0]:
-            vista_forecast(slpcode)
+            render_dashboard(slpcode=slpcode)  # ← nuevo dashboard de inicio
         with tabs[1]:
-            vista_stock(slpcode, None)
+            vista_forecast(slpcode)
         with tabs[2]:
-            vista_historico(slpcode, None)
+            vista_stock(slpcode, None)
         with tabs[3]:
-            vista_ayuda()
+            vista_historico(slpcode, None)
         with tabs[4]:
-            render_alertas_forecast(slpcode)
+            vista_ayuda()
         with tabs[5]:
+            render_alertas_forecast(slpcode)
+        with tabs[6]:
             mostrar_facturas()
     except BaseException as e:
         cls = e.__class__.__name__
