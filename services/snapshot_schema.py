@@ -68,6 +68,8 @@ def actualizar_snapshot_realidad(db_path: str = DB_PATH) -> None:
         raise
 
 
+# B_HST121: obtener_cardcode — CardCode por SnapshotID
+# ∂B_HST121/∂B0
 def obtener_cardcode(snapshot_id: int, db_path: str = DB_PATH) -> str | None:
     df = run_query(
         "SELECT CardCode FROM Snapshot_Forecast WHERE SnapshotID = ?",
@@ -77,6 +79,8 @@ def obtener_cardcode(snapshot_id: int, db_path: str = DB_PATH) -> str | None:
     return df.iloc[0]["CardCode"] if not df.empty else None
 
 
+# B_HST122: obtener_forecastid_cliente — Último ForecastID del cliente
+# ∂B_HST122/∂B0
 def obtener_forecastid_cliente(cardcode: str, db_path: str = DB_PATH) -> int | None:
     df = run_query(
         "SELECT MAX(ForecastID) AS ForecastID FROM Forecast_Detalle WHERE CardCode = ?",
@@ -238,6 +242,8 @@ def ejecutar_snapshot_forecast(db_path: str = DB_PATH) -> None:
         raise
 
 
+# B_HST123: forecast_cero_existente — ¿Existe línea ForecastCero para el mes?
+# ∂B_HST123/∂B0
 def forecast_cero_existente(
     cardcode: str, itemcode: str, fechentr: str, db_path: str = DB_PATH
 ) -> bool:
@@ -260,6 +266,8 @@ def forecast_cero_existente(
     ).empty
 
 
+# B_HST124: build_clave_set — Conjunto de claves existentes para SnapshotIDs
+# ∂B_HST124/∂B0
 def build_clave_set(snapshot_ids: list[int], db_path: str = DB_PATH) -> set[tuple]:
     """
     Devuelve un set (SnapshotID, ItemCode, FechEntr[str]) para los SnapshotID indicados.
@@ -296,6 +304,8 @@ def build_clave_set(snapshot_ids: list[int], db_path: str = DB_PATH) -> set[tupl
 FECH_IDX = 4  # posición de FechEntr dentro de cada tupla de inserción
 
 
+# B_HST125: filtrar_nuevos_detalles — Filtra candidatos no existentes
+# ∂B_HST125/∂B0
 def filtrar_nuevos_detalles(
     candidatos: list[tuple], db_path: str = DB_PATH
 ) -> list[tuple]:
@@ -322,6 +332,8 @@ def filtrar_nuevos_detalles(
     return nuevos
 
 
+# B_HST126: obtener_o_insertar_snapshot — Obtener/crear Snapshot_Forecast mensual
+# ∂B_HST126/∂B0
 def obtener_o_insertar_snapshot(
     slpcode: int,
     cardcode: str,
@@ -381,6 +393,8 @@ def obtener_o_insertar_snapshot(
     )
 
 
+# B_HST127: incluir_forecast_cero — Insertar líneas 'ForecastCero' detectadas
+# ∂B_HST127/∂B0
 def incluir_forecast_cero(db_path: str = DB_PATH) -> None:
     print("🔍 Buscando facturas sin Forecast asignado…")
 
@@ -476,6 +490,8 @@ def incluir_forecast_cero(db_path: str = DB_PATH) -> None:
     print(f"✅ Insertadas {len(inserts_detalle)} líneas ForecastCero nuevas.")
 
 
+# B_HST128: verificar_forecast_cero — Contar registros 'ForecastCero'
+# ∂B_HST128/∂B0
 def verificar_forecast_cero(db_path: str = DB_PATH) -> None:
     query = """
         SELECT COUNT(*) AS TotalForecastCero
@@ -487,6 +503,8 @@ def verificar_forecast_cero(db_path: str = DB_PATH) -> None:
     print(f"📊 Total registros ForecastCero detectados: {total}")
 
 
+# B_HST129: exportar_clientes_sin_forecast — Exportar/retornar clientes sin forecast
+# ∂B_HST129/∂B0
 def exportar_clientes_sin_forecast(
     db_path: str = DB_PATH,
     export_csv: bool = True,
@@ -518,6 +536,8 @@ def exportar_clientes_sin_forecast(
     return df
 
 
+# B_HST130: obtener_clientes_sin_forecast — Listar clientes con ventas sin forecast
+# ∂B_HST130/∂B0
 def obtener_clientes_sin_forecast(db_path: str = DB_PATH) -> pd.DataFrame:
     """
     Retorna clientes con ventas (OINV) pero sin forecast asignado.
@@ -532,6 +552,8 @@ def obtener_clientes_sin_forecast(db_path: str = DB_PATH) -> pd.DataFrame:
     return run_query(query, db_path=db_path)
 
 
+# B_HST131: generar_snapshot_completo — Orquestar snapshot y reporte final
+# ∂B_HST131/∂B0
 def generar_snapshot_completo(db_path: str = DB_PATH) -> pd.DataFrame:
     """
     Ejecuta snapshot y retorna clientes sin forecast para visualización.
@@ -544,6 +566,8 @@ def generar_snapshot_completo(db_path: str = DB_PATH) -> pd.DataFrame:
     return df_no_forecast
 
 
+# B_HST132: snapshot_existente — ¿Hay snapshot para el cliente en el mes?
+# ∂B_HST132/∂B0
 def snapshot_existente(cardcode: str, fecha: str, db_path: str = DB_PATH) -> bool:
     """
     Verifica si ya existe un Snapshot_Forecast para el cliente en el mismo mes.

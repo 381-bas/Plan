@@ -386,7 +386,7 @@ def exportar_index_json(bloques: List[dict], ruta_salida: str) -> None:
         print(f"❌ Error al exportar JSON SCANNER: {e}")
 
 
-# B_EXP016→B_EXP022: Exportación unificada ÚNICA con anexos SCANNER por archivo
+# B_EXP022: Exportación unificada ÚNICA con anexos SCANNER por archivo
 # # ∂B_EXP022/∂B0
 def exportar_unificado_unico(
     modulos: List[dict], bloques_map: Dict[str, List[dict]]

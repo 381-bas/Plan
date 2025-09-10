@@ -1,5 +1,8 @@
 ﻿# session_utils.py
 from __future__ import annotations
+
+# B_CTX100: Imports y constantes
+# ∂B_CTX100/∂B0
 from pathlib import Path
 from typing import Any
 import io
@@ -10,6 +13,8 @@ import os
 import time
 
 
+# B_CTX121: save_df_parquet_atomic — Escritura atómica a Parquet
+# ∂B_CTX121/∂B0
 def save_df_parquet_atomic(df: pd.DataFrame, path: str | Path) -> None:
     """
     Escritura atómica en Parquet: escribe a .tmp y luego replace.
@@ -44,6 +49,8 @@ def save_df_parquet_atomic(df: pd.DataFrame, path: str | Path) -> None:
         raise
 
 
+# B_CTX122: load_df_parquet_safe — Lectura Parquet segura (directorio permitido)
+# ∂B_CTX122/∂B0
 def load_df_parquet_safe(path: str | Path, allowed_dir: str | Path) -> pd.DataFrame:
     """
     Lee Parquet sólo si `path` cae dentro de `allowed_dir`.
@@ -95,12 +102,18 @@ except Exception:  # permite importar sin Streamlit en tests
     st = _Dummy()
 
 
+# B_CTX120: Gestión de estado de sesión (claves/estructuras)
+# ∂B_CTX120/∂B0
+# B_CTX123: set_slpcode — Setear SlpCode en sesión
+# ∂B_CTX123/∂B0
 def set_slpcode(value: int) -> None:
     """Set SlpCode de forma canónica (sin escribir la key legada)."""
     v = int(value)
     st.session_state["SlpCode"] = v
 
 
+# B_CTX124: get_slpcode — Obtener SlpCode con fallback
+# ∂B_CTX124/∂B0
 def get_slpcode(default: int = 999) -> int:
     """Lee SlpCode; permite fallback temporal a 'slpcode' (solo lectura)."""
     return int(
@@ -108,6 +121,8 @@ def get_slpcode(default: int = 999) -> int:
     )
 
 
+# B_CTX125: normalize_slpcode_session — Normalizar clave SlpCode en sesión
+# ∂B_CTX125/∂B0
 def normalize_slpcode_session(default: int = 999) -> None:
     """
     Asegura que 'SlpCode' exista en session_state:
@@ -152,11 +167,15 @@ class _RestrictedUnpickler(pickle.Unpickler):
         raise ValueError(f"Objeto no permitido al unpickle: {module}.{name}")
 
 
+# B_CTX126: restricted_unpickle — Unpickle restringido con whitelist
+# ∂B_CTX126/∂B0
 def restricted_unpickle(fp: io.BufferedReader) -> Any:
     """Carga ‘pickle’ con lista blanca de tipos permitidos."""
     return _RestrictedUnpickler(fp).load()
 
 
+# B_CTX127: normalize_df_for_hash — Normalización DF para hashing estable
+# ∂B_CTX127/∂B0
 def normalize_df_for_hash(df: "pd.DataFrame") -> "pd.DataFrame":
     """
     Normaliza DF para hashing estable: columnas→str, orden filas/cols, ‘float64’ donde aplique.
@@ -186,11 +205,15 @@ DETALLE_OBLIGATORIAS: list[str] = [
 ]
 
 
+# B_CTX128: ensure_mes_str2 — Mes con 2 dígitos (texto)
+# ∂B_CTX128/∂B0
 def ensure_mes_str2(s: pd.Series) -> pd.Series:
     """Mes en texto 2 dígitos ('01'..'12')."""
     return s.astype(str).str.zfill(2)
 
 
+# B_CTX129: fechentr_from_anio_mes — Construir FechEntr desde año y mes
+# ∂B_CTX129/∂B0
 def fechentr_from_anio_mes(anio: int, mes):
     """
     Construye FechEntr como primer día del mes (date) a partir de `anio` y `mes`.
@@ -213,6 +236,8 @@ def fechentr_from_anio_mes(anio: int, mes):
     return dt.dt.date
 
 
+# B_CTX130: attach_campos_largo — Reinyectar campos base al DF de cambios
+# ∂B_CTX130/∂B0
 def attach_campos_largo(
     df_cambios: pd.DataFrame, df_largo: pd.DataFrame, anio: int
 ) -> pd.DataFrame:
@@ -263,6 +288,8 @@ def attach_campos_largo(
     return df_m
 
 
+# B_CTX131: ensure_detalle_schema — Asegurar esquema de detalle
+# ∂B_CTX131/∂B0
 def ensure_detalle_schema(df: pd.DataFrame, anio: int) -> pd.DataFrame:
     """
     Asegura esquema requerido por inserción de detalle.

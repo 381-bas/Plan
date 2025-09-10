@@ -23,9 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-# =========================
-# CONFIG (ajusta si quieres)
-# =========================
+
 CONFIG = {
     "DEFAULT_ROOT": str(Path(__file__).resolve().parent),  # repo actual
     "DEFAULT_OUT_BASE": str(
@@ -36,9 +34,6 @@ CONFIG = {
 }
 
 
-# ==============
-# Data classes
-# ==============
 @dataclass
 class FunctionInfo:
     name: str
@@ -74,9 +69,6 @@ class FileInfo:
     txt_defs: List[str] = None  # for .txt
 
 
-# ==============
-# Helpers
-# ==============
 def sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
@@ -356,9 +348,6 @@ Siguientes pasos sugeridos:
     (out_dir / "summary.txt").write_text(summary, encoding="utf-8")
 
 
-# =========================
-# API pública programática
-# =========================
 def run_scan(
     root_dir: str, out_base: str, include_txt: bool = True, stamp_subfolder: bool = True
 ) -> Path:
@@ -373,9 +362,6 @@ def run_scan(
     return out_dir
 
 
-# ==========
-# Entrypoint
-# ==========
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="SYMBIOS Local Scanner (auto-config)")
     ap.add_argument(
